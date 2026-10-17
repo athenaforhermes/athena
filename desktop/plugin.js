@@ -7077,7 +7077,7 @@ function SendToApp({ ctx }) {
   const s = useSendToApp(ctx)
   const view = acceptsPanel(s.data, { name: s.file })
   if (!s.file) {
-    return jsx('div', { className: 'ah-send idle', children: view.head })
+    return null
   }
   const pace = s.snap && s.snap.state ? jobPace(s.snap) : null
   const done = s.snap && s.snap.state && s.snap.state !== 'running'
@@ -7880,8 +7880,16 @@ function Preview({ ctx, t, entry, refetch, select, onExpand }) {
     if (!confirmDel) { setConfirmDel(true); return }
     setOpBusy(true)
     try {
-      const r = await ctx.rest('/delete', { method: 'POST', timeoutMs: 30000, body: { paths: [entry.path] } })
-      if (!r?.ok) opErr((r?.failed?.[0]?.error) || 'delete failed')
+      let r = await ctx.rest('/delete', { method: 'POST', timeoutMs: 30000, body: { paths: [entry.path] } })
+      if (!r || typeof r.ok !== 'boolean') {
+        r = await ctx.rest('/api/plugins/athena/files/delete', { method: 'POST', timeoutMs: 30000, body: { paths: [entry.path] } })
+      }
+      if (!r?.ok) {
+        opErr((r?.failed?.[0]?.error) || 'delete failed — the file is still there')
+        setConfirmDel(false)
+        setOpBusy(false)
+        return
+      }
       select(null)
       refetch()
     } catch (e) { opErr(e) }
@@ -8053,8 +8061,11 @@ function MultiPanel({ ctx, t, entries, cwd, clearSel, refresh }) {
   const doDelete = () => {
     if (!confirmDel) { setConfirmDel(true); return }
     run(async () => {
-      const r = await ctx.rest('/delete', { method: 'POST', timeoutMs: 120000, body: { paths } })
-      if (!r?.ok) throw new Error((r?.failed?.[0]?.error) || 'delete failed')
+      let r = await ctx.rest('/delete', { method: 'POST', timeoutMs: 120000, body: { paths } })
+      if (!r || typeof r.ok !== 'boolean') {
+        r = await ctx.rest('/api/plugins/athena/files/delete', { method: 'POST', timeoutMs: 120000, body: { paths } })
+      }
+      if (!r?.ok) throw new Error((r?.failed?.[0]?.error) || 'delete failed — the files are still there')
     })
   }
   return jsxs('div', { className: 'hermes-fb-preview', children: [

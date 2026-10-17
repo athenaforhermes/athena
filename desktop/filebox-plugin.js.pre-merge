@@ -1,0 +1,1820 @@
+/**
+ * Hermes-Filebox — desktop half of the unified hermes-filebox package.
+ * Windows-Explorer-style pane: quick access, breadcrumbs, icon grid,
+ * search, preview, mkdir. Enable in Settings → Plugins.
+ *
+ * Plain ESM, loaded uncompiled — jsx() calls, not JSX syntax.
+ * Only these imports resolve: @hermes/plugin-sdk, react, react/jsx-runtime.
+ */
+import {
+  atom, Button, Codicon, ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger, GlyphSpinner, host, SearchField, STATUSBAR_AREAS, Tip, usePluginI18n, useQuery, useValue
+} from '@hermes/plugin-sdk'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { jsx, jsxs } from 'react/jsx-runtime'
+
+const ID = 'hermes-filebox'
+const RENDER_CAP = 800
+const collapsed = atom(true)
+const clipboard = atom(null)
+const pendingRename = atom(null)
+const pendingDelete = atom(null)
+const dirBump = atom(0)
+const activeJob = atom(null)
+const jobStatus = atom(null)
+let jobResolve = null
+let jobDoneFlag = false
+const runJob = async (ctx, op, body, label) => {
+  const s = await ctx.rest('/jobstart', { method: 'POST', timeoutMs: 30000, body: { op, ...body } })
+  if (!s?.job_id) return s
+  jobDoneFlag = false
+  jobResolve = null
+  jobStatus.set(null)
+  activeJob.set({ id: s.job_id, op, label: label || op })
+  return new Promise(resolve => {
+    jobResolve = resolve
+    setTimeout(() => { if (jobResolve === resolve) { jobResolve = null; resolve({ ok: false, error: 'job timeout' }) } }, 3600000)
+  })
+}
+const cancelJob = ctx => {
+  const j = activeJob.get()
+  if (j) ctx.rest('/jobcancel', { method: 'POST', timeoutMs: 15000, body: { job_id: j.id } }).catch(() => {})
+}
+// Dual-pane registry: every mounted TabPane reports { cwd, visible } here so
+// "copy/move to other pane" can find the visible peer without prop drilling.
+const paneCwds = {}
+const otherPaneCwd = (tabId, cwd) => {
+  try {
+    const hit = Object.entries(paneCwds).find(([id, v]) => String(id) !== String(tabId) && v && v.visible && v.cwd && v.cwd !== 'trash://' && v.cwd !== cwd)
+    return hit ? hit[1].cwd : null
+  } catch { return null }
+}
+
+function hasFbPaths(ev) {
+  try { return Array.from(ev.dataTransfer?.types || []).includes('application/x-hermes-filebox-paths') } catch { return false }
+}
+
+function parentDir(p) {
+  const d = String(p || '').replace(/[/\\][^/\\]+$/, '')
+  return d || p
+}
+let paneCtx = null
+let paneRegister = null
+let paneDispose = null
+
+function syncPane() {
+  if (!paneCtx || !paneRegister) return
+  const open = !collapsed.get()
+  if (open && !paneDispose) {
+    try { paneDispose = paneRegister() } catch { /* noop */ }
+    try { if (host && typeof host.revealPane === 'function') host.revealPane('hermes-filebox:hermes-filebox-pane') } catch { /* noop */ }
+  } else if (!open && paneDispose) {
+    try { paneDispose() } catch { /* noop */ }
+    paneDispose = null
+  }
+}
+
+const EN = {
+  explorer: 'Explorer',
+  quickAccess: 'Quick access',
+  thisPC: 'This PC',
+  searchFiles: 'Search this folder…',
+  searchDeep: (n, folder) => `🔍 ${n} found under ${folder} — double-click a folder to go there`,
+  searchMore: 'Showing first results — refine to narrow',
+  searchingSub: 'Searching subfolders…',
+  back: 'Back', fwd: 'Forward', up: 'Up', refresh: 'Refresh', home: 'Home',
+  newFolder: 'New folder', newFile: 'New file', create: 'Create', cancel: 'Cancel',
+  showHidden: 'Show hidden files',
+  pinFolder: 'Pin this folder', unpinFolder: 'Unpin this folder',
+  reveal: 'Show in Explorer', copyPath: 'Copy path', openFile: 'Open',
+  rename: 'Rename', save: 'Save',
+  copy: 'Copy', cut: 'Cut', paste: 'Paste', duplicate: 'Duplicate',
+  delete: 'Delete', confirmDelete: 'Confirm delete?',
+  compress: 'Compress', extract: 'Extract here',
+  openFailed: 'Could not open — revealed the folder instead.',
+  items: n => `${n} item${n === 1 ? '' : 's'}`,
+  showingFirst: (a, b) => `Showing ${a} of ${b} — refine search`,
+  emptyFolder: 'Empty folder.',
+  backendDown: 'Backend unreachable — enable hermes-filebox and restart the gateway.',
+  sortBy: 'Sort',
+  sortName: 'Name', sortSize: 'Size', sortDate: 'Modified', sortType: 'Type',
+  preview: 'Preview', details: 'Details',
+  closePreview: 'Close preview',
+  collapse: 'Collapse panel', expand: 'Expand panel',
+  binaryFile: 'Binary file — no text preview.',
+  mediaBlocked: 'Preview blocked here — use Open instead.',
+  bigModel: 'Model too large to preview — use Open instead.',
+  resetView: 'Reset view',
+  readFull: 'Read full file',
+  editFile: 'Edit',
+  showLess: 'Show less',
+  updateTo: v => `Update to v${v}`,
+  checkingUpdate: 'Checking for updates…',
+  upToDate: v => `v${v} · up to date`,
+  updateDone: 'Updated — restart the gateway and reload the window to apply.',
+  selectedN: (n, size) => `${n} selected · ${size}`,
+  clear: 'Clear selection',
+  dragResize: 'Drag to resize',
+  recycleBin: 'Recycle Bin',
+  restore: 'Restore',
+  restoreFirst: 'Restore it from the Recycle Bin first.',
+  emptyBin: 'Empty Recycle Bin',
+  emptyBinTip: 'Permanently delete everything in the Recycle Bin',
+  confirmEmpty: 'Click again to empty',
+  origPath: 'Original location',
+  deletedOn: 'Deleted',
+  copyOutside: 'Copy outside Hermes',
+  nothingToPaste: 'Nothing to paste — copy something first.',
+  aheadV: v => `Unpushed v${v}`,
+  aheadTip: (l, r) => `Local v${l} is ahead of GitHub v${r} — push to publish it. Click to re-check.`,
+  viewList: 'List view',
+  viewGrid: 'Grid view',
+  cName: 'Name',
+  cSize: 'Size',
+  cModified: 'Modified',
+  cType: 'Type',
+  folder: 'Folder',
+  properties: 'Properties',
+  location: 'Location',
+  type: 'Type',
+  kindFolder: 'Folder',
+  size: 'Size',
+  created: 'Created',
+  modified: 'Modified',
+  hidden: 'Hidden',
+  calcSize: 'Calculate size',
+  calcNote: 'Large folders are sampled at 100k files.',
+  yes: 'Yes',
+  no: 'No',
+  editPath: 'Edit path',
+  pathNotFound: 'Path not found',
+  notFolder: 'Not a folder — selected it instead',
+  expand: 'Expand',
+  zoomIn: 'Zoom in',
+  zoomOut: 'Zoom out',
+  zoomReset: 'Reset zoom',
+  searchContent: 'Search inside files',
+  grepHits: (n, files) => `📄 ${n} matches in ${files} — click to open`,
+  grepMore: 'showing first 100',
+  noGrepHits: 'No matches in file contents',
+  browseZip: 'Browse inside',
+  closeZip: 'Back to folder',
+  extractAll: 'Extract all here',
+  openMember: 'Open',
+  zipOpBlocked: 'Not available inside zips — extract first',
+  jobCopy: n => `Copy ${n} item${n === 1 ? '' : 's'}`,
+  jobMove: n => `Move ${n} item${n === 1 ? '' : 's'}`,
+  jobZip: n => `Compress ${n} item${n === 1 ? '' : 's'}`,
+  jobExtract: name => `Extract ${name}`,
+  cancelJob: 'Cancel',
+  dualPane: 'Split view (dual pane)',
+  copyToOther: 'Copy to other pane',
+  moveToOther: 'Move to other pane',
+  noOtherPane: 'No other pane available',
+}
+const LOCALES = { en: EN }
+
+const CSS = `
+.hermes-fb{display:flex;height:100%;min-height:0;color:var(--ui-text-primary);position:relative}
+.hermes-fb-nav{width:148px;flex-shrink:0;overflow-y:auto;padding:6px 4px;border-right:1px solid var(--ui-stroke-secondary)}
+.hermes-fb-group{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--ui-text-quaternary);padding:6px 6px 2px}
+.hermes-fb-navbtn{display:flex;align-items:center;gap:6px;width:100%;text-align:left;font-size:12px;color:var(--ui-text-secondary);background:none;border:0;border-radius:4px;padding:4px 6px;cursor:pointer;min-width:0}
+.hermes-fb-navbtn:hover{background:var(--chrome-action-hover);color:var(--ui-text-primary)}
+.hermes-fb-navbtn[data-on=true]{background:var(--chrome-action-hover);color:var(--ui-accent)}
+.hermes-fb-navbtn span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hermes-fb-drivebar{height:3px;border-radius:2px;background:var(--chrome-action-hover);margin:2px 6px 4px;overflow:hidden}
+.hermes-fb-drivebar>div{height:100%;background:var(--ui-accent)}
+.hermes-fb-main{flex:1;min-width:0;display:flex;flex-direction:column}
+.hermes-fb-toolbar{display:flex;align-items:center;gap:2px;padding:4px 6px;flex-shrink:0}
+.hermes-fb-tbtn{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;color:var(--ui-text-secondary);background:none;border:0;border-radius:4px;cursor:pointer;flex-shrink:0}
+.hermes-fb-tbtn:hover:not(:disabled){background:var(--chrome-action-hover);color:var(--ui-text-primary)}
+.hermes-fb-tbtn:disabled{opacity:.3;cursor:default}
+.hermes-fb-crumbs{display:flex;align-items:center;gap:0;flex:1;min-width:0;overflow-x:auto;font-size:12px;scrollbar-width:none}
+.hermes-fb-crumbs::-webkit-scrollbar{display:none}
+.hermes-fb-crumb{background:none;border:0;color:var(--ui-text-secondary);cursor:pointer;padding:3px 5px;border-radius:4px;white-space:nowrap;font-size:12px}
+.hermes-fb-crumb:hover{background:var(--chrome-action-hover);color:var(--ui-text-primary)}
+.hermes-fb-crumb[data-on=true]{color:var(--ui-accent)}
+.hermes-fb-searchrow{display:flex;gap:4px;padding:0 6px 4px;flex-shrink:0;align-items:center}
+.hermes-fb-search{flex:1;min-width:0}
+.hermes-fb-search input{width:100%}
+.hermes-fb-sort{background:transparent;border:1px solid var(--ui-stroke-secondary);border-radius:4px;color:var(--ui-text-secondary);font-size:11px;height:24px;flex-shrink:0}
+.hermes-fb-grid{flex:1;min-height:0;overflow-y:auto;padding:2px 6px;display:grid;gap:2px;align-content:start}
+.hermes-fb-tile{display:flex;flex-direction:column;align-items:center;gap:2px;background:none;border:1px solid transparent;border-radius:6px;padding:8px 4px 6px;cursor:pointer;min-width:0;color:var(--ui-text-primary)}
+.hermes-fb-tile:hover{background:var(--chrome-action-hover)}
+.hermes-fb-tile[data-on=true]{border-color:var(--ui-accent);background:var(--chrome-action-hover)}
+.hermes-fb-tileicon{color:var(--ui-text-tertiary);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.hermes-fb-tile[data-dir=true] .hermes-fb-tileicon{color:#dcb959}
+.hermes-fb-tileimg{border-radius:4px;object-fit:cover;background:var(--chrome-action-hover)}
+.hermes-fb-tilename{font-size:11px;line-height:14px;text-align:center;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
+.hermes-fb-tilesub{font-size:10px;color:var(--ui-text-quaternary);white-space:nowrap}
+.hermes-fb-status{display:flex;gap:8px;font-size:11px;color:var(--ui-text-tertiary);padding:4px 8px;border-top:1px solid var(--ui-stroke-secondary);flex-shrink:0;overflow:hidden;white-space:nowrap}
+.hermes-fb-preview{border-top:1px solid var(--ui-stroke-secondary);max-height:44%;overflow-y:auto;padding:6px 8px;flex-shrink:0}
+.hermes-fb-preview img{max-width:100%;border-radius:6px}
+.hermes-fb-preview pre{font-size:11px;line-height:15px;white-space:pre-wrap;word-break:break-word;color:var(--ui-text-secondary);margin:4px 0 0;font-family:inherit}
+.hermes-fb-kv{display:flex;justify-content:space-between;font-size:11px;color:var(--ui-text-secondary);padding:1px 0}
+.hermes-fb-kv b{color:var(--ui-text-primary);font-weight:600}
+.hermes-fb-actions{display:flex;gap:4px;margin-top:6px;flex-wrap:wrap}
+.hermes-fb-mkdir{display:flex;gap:4px;padding:4px 6px;flex-shrink:0}
+.hermes-fb-mkdir input{flex:1;min-width:0;height:24px;font-size:12px;padding:0 6px;border-radius:4px;border:1px solid var(--ui-stroke-secondary);background:transparent;color:var(--ui-text-primary)}
+.hermes-fb-error{font-size:11px;color:var(--ui-text-secondary);padding:8px}
+.hermes-fb-tabs{display:flex;align-items:center;gap:2px;padding:4px 6px 0;flex-shrink:0;overflow-x:auto;scrollbar-width:none;border-bottom:1px solid var(--ui-stroke-secondary)}
+.hermes-fb-tab{display:inline-flex;align-items:center;gap:5px;max-width:150px;font-size:11px;color:var(--ui-text-secondary);background:none;border:1px solid transparent;border-bottom:0;border-radius:6px 6px 0 0;padding:4px 6px;cursor:pointer;white-space:nowrap;flex-shrink:0}
+.hermes-fb-tab:hover{color:var(--ui-text-primary)}
+.hermes-fb-tab[data-on=true]{background:var(--chrome-action-hover);color:var(--ui-text-primary);border-color:var(--ui-stroke-secondary)}
+.hermes-fb-tab span:first-child{overflow:hidden;text-overflow:ellipsis}
+.hermes-fb-tabx{background:none;border:0;color:var(--ui-text-quaternary);cursor:pointer;font-size:13px;line-height:1;padding:0 2px;border-radius:3px}
+.hermes-fb-tabx:hover{color:var(--ui-text-primary)}
+.hermes-fb-grip{width:6px;cursor:col-resize;flex-shrink:0;border-right:1px solid var(--ui-stroke-secondary)}
+.hermes-fb-grip:hover{background:var(--ui-accent)}
+.hermes-fb-rail{width:26px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;padding-top:6px;border-right:1px solid var(--ui-stroke-secondary)}
+.hermes-fb-opsbar{display:flex;gap:4px;flex-wrap:wrap;align-items:center;padding:6px 8px;border-bottom:1px solid var(--ui-stroke-secondary)}
+.hermes-fb-pvwrap{display:flex;flex-direction:column;flex-shrink:0;min-height:0;border-top:1px solid var(--ui-stroke-secondary)}
+.hermes-fb-pvwrap .hermes-fb-preview{border-top:0;flex:1;min-height:0;max-height:none}
+.hermes-fb-griph{height:8px;cursor:row-resize;flex-shrink:0;touch-action:none;position:relative}
+.hermes-fb-griph::after{content:'';position:absolute;left:50%;top:3px;width:36px;height:2px;margin-left:-18px;border-radius:1px;background:var(--ui-stroke-secondary)}
+.hermes-fb-griph:hover{background:var(--chrome-action-hover)}
+.hermes-fb-griph:hover::after{background:var(--ui-accent)}
+.hermes-fb-tile[data-drop=true]{border-color:var(--ui-accent);background:var(--chrome-action-hover)}
+.hermes-fb-list{flex:1;min-height:0;overflow-y:auto;padding:2px 4px;display:flex;flex-direction:column}
+.hermes-fb-lhead,.hermes-fb-lrow{display:grid;grid-template-columns:minmax(0,1fr) 84px 128px 72px;gap:8px;align-items:center;padding:3px 8px;font-size:12px}
+.hermes-fb-lhead{color:var(--ui-text-tertiary);font-size:10px;text-transform:uppercase;letter-spacing:.05em}
+.hermes-fb-lhbtn{background:none;border:0;padding:0;font:inherit;color:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer;text-align:left}
+.hermes-fb-lhbtn:hover{color:var(--ui-text-primary)}
+.hermes-fb-lhbtn[data-on=true]{color:var(--ui-accent)}
+.hermes-fb-lrow{border-radius:4px;cursor:pointer;color:var(--ui-text-primary)}
+.hermes-fb-lrow:hover{background:var(--chrome-action-hover)}
+.hermes-fb-lrow[data-on=true]{background:var(--chrome-action-hover)}
+.hermes-fb-lrow[data-drop=true]{outline:1px solid var(--ui-accent)}
+.hermes-fb-lname{display:flex;gap:8px;align-items:center;min-width:0}
+.hermes-fb-lname span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hermes-fb-lnum{text-align:right;color:var(--ui-text-secondary)}
+.hermes-fb-list:focus,.hermes-fb-grid:focus{outline:none}
+.hermes-fb-lb{position:absolute;inset:0;z-index:30;background:rgba(0,0,0,.9);display:flex;flex-direction:column}
+.hermes-fb-lbhead{display:flex;align-items:center;gap:6px;padding:6px 8px;font-size:12px;color:#ddd;flex-shrink:0}
+.hermes-fb-lbhead .hermes-fb-tbtn{color:#bbb}
+.hermes-fb-lbbody{flex:1;min-height:0;overflow:auto;display:flex;align-items:center;justify-content:center;padding:8px}
+.hermes-fb-lbbody img{border-radius:4px;object-fit:contain}
+.hermes-fb-addr{flex:1;min-width:0;height:24px;font-size:12px;padding:0 6px;border-radius:4px;border:1px solid var(--ui-accent);background:transparent;color:var(--ui-text-primary)}
+`
+
+const CODE_EXTS = new Set(['.py', '.js', '.ts', '.tsx', '.jsx', '.mjs', '.cjs', '.json', '.yaml', '.yml', '.toml', '.md', '.txt', '.log', '.ini', '.cfg', '.css', '.html', '.xml', '.csv', '.ps1', '.bat', '.sh', '.java', '.c', '.cpp', '.h', '.rs', '.go', '.kt', '.sql', '.vue'])
+const IMG_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.ico', '.tif', '.tiff'])
+const VID_EXTS = new Set(['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.webm', '.m4v', '.ts'])
+const AUD_EXTS = new Set(['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.opus', '.wma'])
+const MODEL_EXTS = new Set(['.stl', '.obj'])
+const ZIP_EXTS = new Set(['.zip', '.7z', '.rar', '.tar', '.gz'])
+
+function category(e) {
+  if (e.is_dir) return 'dir'
+  if (IMG_EXTS.has(e.ext)) return 'img'
+  if (AUD_EXTS.has(e.ext)) return 'audio'
+  if (VID_EXTS.has(e.ext)) return 'video'
+  if (MODEL_EXTS.has(e.ext)) return 'model'
+  if (ZIP_EXTS.has(e.ext)) return 'zip'
+  if (CODE_EXTS.has(e.ext)) return 'code'
+  if (e.ext === '.pdf') return 'pdf'
+  return 'file'
+}
+
+function iconFor(cat) {
+  switch (cat) {
+    case 'dir': return 'folder'
+    case 'img': case 'audio': case 'video': return 'file-media'
+    case 'zip': return 'file-zip'
+    case 'code': return 'file-code'
+    case 'pdf': return 'file-pdf'
+    default: return 'file'
+  }
+}
+
+function fmtSize(b) {
+  b = Number(b) || 0
+  if (b >= 1073741824) return `${(b / 1073741824).toFixed(1)} GB`
+  if (b >= 1048576) return `${(b / 1048576).toFixed(1)} MB`
+  if (b >= 1024) return `${(b / 1024).toFixed(0)} KB`
+  return `${b} B`
+}
+
+function fmtDate(epoch) {
+  if (!epoch) return '—'
+  const d = new Date(epoch * 1000)
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (sameDay) return time
+  return `${d.toLocaleDateString([], { month: 'numeric', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' })} ${time}`
+}
+
+function splitPath(path) {
+  const parts = path.split(/[/\\]+/).filter(Boolean)
+  if (/^[A-Za-z]:$/.test(parts[0])) parts[0] = `${parts[0]}\\`
+  return parts
+}
+
+function thumbKind(ext) {
+  if (IMG_EXTS.has(ext)) return 'img'
+  if (VID_EXTS.has(ext)) return 'video'
+  if (MODEL_EXTS.has(ext)) return 'model'
+  return null
+}
+
+function Thumb({ ctx, entry, px, fallback }) {
+  const kind = thumbKind(entry.ext)
+  const ep = kind === 'video' ? '/videothumb' : kind === 'model' ? '/modelthumb' : '/thumb'
+  const q = useQuery({
+    queryKey: [ID, ep, entry.path, entry.mtime],
+    queryFn: ({ signal }) => ctx.rest(ep, { method: 'POST', timeoutMs: 30000, signal, body: { path: entry.path, size: 256 } }),
+    enabled: !!kind,
+    staleTime: 300000,
+    retry: false,
+  })
+  if (!kind || q.isError) return fallback || null
+  if (!q.data?.data_url) return null
+  return jsx('img', { className: 'hermes-fb-tileimg', src: q.data.data_url, alt: '', loading: 'lazy', style: { width: px, height: px } })
+}
+
+function fileUrl(path) {
+  return 'file:///' + String(path || '').replace(/\\/g, '/').split('/').map(encodeURIComponent).join('/')
+}
+
+function fileDlUrl(path) {
+  // Same-origin backend stream for <audio>/<video> when file:// is blocked.
+  const base = (typeof window !== 'undefined' && window.location && window.location.origin) || ''
+  return `${base}/api/plugins/hermes-filebox/dl?path=${encodeURIComponent(path)}`
+}
+
+function parseModel(ext, bytes) {
+  const capTris = 12000
+  if (ext === '.obj') {
+    const text = new TextDecoder().decode(bytes.slice(0, 32 * 1024 * 1024))
+    const verts = []
+    const out = []
+    for (const line of text.split('\n')) {
+      if (line[0] === 'v' && line[1] === ' ') {
+        const p = line.split(/\s+/)
+        verts.push([+p[1], +p[2], +p[3]])
+      } else if (line[0] === 'f' && line[1] === ' ') {
+        const idx = line.slice(1).trim().split(/\s+/).map(s => parseInt(s.split('/')[0], 10) - 1)
+        for (let k = 1; k < idx.length - 1 && out.length < capTris * 9; k++) {
+          for (const j of [idx[0], idx[k], idx[k + 1]]) {
+            const v = verts[j]
+            if (v && v.every(Number.isFinite)) out.push(v[0], v[1], v[2])
+          }
+        }
+      }
+      if (out.length >= capTris * 9) break
+    }
+    const n = Math.floor(out.length / 9)
+    return n ? { tris: new Float32Array(out.slice(0, n * 9)), n } : null
+  }
+  if (bytes.length > 84) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const count = dv.getUint32(80, true)
+    if (count > 0 && count < 3000000 && 84 + count * 50 === bytes.length) {
+      const stride = Math.max(1, Math.ceil(count / capTris))
+      const out = []
+      for (let i = 0; i < count; i += stride) {
+        const o = 84 + i * 50 + 12
+        for (let k = 0; k < 9; k++) out.push(dv.getFloat32(o + k * 4, true))
+      }
+      return { tris: new Float32Array(out), n: Math.floor(out.length / 9) }
+    }
+  }
+  const text = new TextDecoder().decode(bytes.slice(0, 64 * 1024 * 1024))
+  const re = /vertex\s+(\S+)\s+(\S+)\s+(\S+)/g
+  const out = []
+  let m
+  while ((m = re.exec(text)) && out.length < capTris * 9) out.push(+m[1], +m[2], +m[3])
+  const n = Math.floor(out.length / 9)
+  return n ? { tris: new Float32Array(out.slice(0, n * 9)), n } : null
+}
+
+function drawModel(canvas, geo, rx, ry, zoom) {
+  const W = canvas.width, H = canvas.height
+  const g = canvas.getContext('2d')
+  g.fillStyle = '#141419'
+  g.fillRect(0, 0, W, H)
+  const { tris, n } = geo
+  const b = geo.bounds
+  const span = Math.max(b.x1 - b.x0, b.y1 - b.y0, b.z1 - b.z0, 1e-9)
+  const s = Math.min(W, H) * 0.42 * zoom / span
+  const ox = W / 2, oy = H / 2
+  const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2, cz = (b.z0 + b.z1) / 2
+  const c1 = Math.cos(ry), s1 = Math.sin(ry), c2 = Math.cos(rx), s2 = Math.sin(rx)
+  const items = []
+  for (let i = 0; i < n; i++) {
+    const p = []
+    for (let k = 0; k < 3; k++) {
+      const X = tris[i * 9 + k * 3] - cx, Y = tris[i * 9 + k * 3 + 1] - cy, Z = tris[i * 9 + k * 3 + 2] - cz
+      const x1 = X * c1 + Z * s1, z1 = -X * s1 + Z * c1
+      const y1 = Y * c2 - z1 * s2, z2 = Y * s2 + z1 * c2
+      p.push(ox + x1 * s, oy - y1 * s, z2)
+    }
+    const ex = p[3] - p[0], ey = p[4] - p[1], ez = p[5] - p[2]
+    const fx = p[6] - p[0], fy = p[7] - p[1], fz = p[8] - p[2]
+    const nx = ey * fz - ez * fy, ny = ez * fx - ex * fz, nz = ex * fy - ey * fx
+    const ln = Math.sqrt(nx * nx + ny * ny + nz * nz) + 1e-9
+    const shade = Math.abs((nx * 0.4 + ny * 0.5 + nz * 0.75) / ln / 1.05)
+    items.push({ p, d: (p[2] + p[5] + p[8]) / 3, v: Math.round(45 + 175 * Math.min(1, 0.15 + 0.85 * shade)) })
+  }
+  items.sort((a, b) => a.d - b.d)
+  for (const it of items) {
+    const v = it.v
+    g.fillStyle = `rgb(${v},${v},${Math.min(255, v + 12)})`
+    g.beginPath()
+    g.moveTo(it.p[0], it.p[1])
+    g.lineTo(it.p[3], it.p[4])
+    g.lineTo(it.p[6], it.p[7])
+    g.closePath()
+    g.fill()
+  }
+}
+
+function ModelView({ ctx, t, entry }) {
+  const ref = useRef(null)
+  const [rot, setRot] = useState({ x: 0.5, y: 0.6, z: 1 })
+  const q = useQuery({
+    queryKey: [ID, 'raw', entry.path, entry.mtime],
+    queryFn: ({ signal }) => ctx.rest('/raw', { method: 'POST', timeoutMs: 30000, signal, body: { path: entry.path, max_mb: 48 } }),
+    enabled: entry.size < 96 * 1024 * 1024,
+    staleTime: 300000,
+    retry: false,
+  })
+  const geo = useMemo(() => {
+    if (!q.data?.b64) return null
+    try {
+      const bin = Uint8Array.from(atob(q.data.b64), c => c.charCodeAt(0))
+      const parsed = parseModel(entry.ext, bin)
+      if (!parsed || !parsed.tris.every(Number.isFinite)) return { error: true }
+      let x0 = 1 / 0, y0 = 1 / 0, z0 = 1 / 0, x1 = -1 / 0, y1 = -1 / 0, z1 = -1 / 0
+      const tr = parsed.tris
+      for (let i = 0; i < tr.length; i += 3) {
+        const X = tr[i], Y = tr[i + 1], Z = tr[i + 2]
+        if (X < x0) x0 = X; if (X > x1) x1 = X
+        if (Y < y0) y0 = Y; if (Y > y1) y1 = Y
+        if (Z < z0) z0 = Z; if (Z > z1) z1 = Z
+      }
+      return { ...parsed, bounds: { x0, y0, z0, x1, y1, z1 } }
+    } catch { return { error: true } }
+  }, [q.data])
+  useEffect(() => {
+    if (ref.current && geo && !geo.error) {
+      try { drawModel(ref.current, geo, rot.x, rot.y, rot.z) } catch { /* noop */ }
+    }
+  }, [geo, rot])
+  const startSpin = e => {
+    e.preventDefault()
+    const sx = e.clientX, sy = e.clientY
+    const r0 = { ...rot }
+    const move = ev => setRot(r => ({ ...r, x: r0.x + (ev.clientY - sy) * 0.01, y: r0.y + (ev.clientX - sx) * 0.01 }))
+    const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
+  if (entry.size >= 96 * 1024 * 1024) return jsx('div', { className: 'hermes-fb-error', children: t('bigModel') })
+  if (q.isError) return jsx('div', { className: 'hermes-fb-error', children: t('mediaBlocked') })
+  if (!geo) return jsx(GlyphSpinner, { ariaLabel: entry.name })
+  if (geo.error) return jsx('div', { className: 'hermes-fb-error', children: t('mediaBlocked') })
+  return jsxs('div', { children: [
+    jsx('canvas', { ref, width: 560, height: 340, onMouseDown: startSpin, style: { width: '100%', borderRadius: 6, marginTop: 4, cursor: 'grab', background: '#141419', touchAction: 'none' } }),
+    jsxs('div', { className: 'hermes-fb-actions', children: [
+      jsx('span', { className: 'hermes-fb-tilesub', children: `${geo.n} tris · drag to rotate` }),
+      jsx('span', { style: { flex: 1 } }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => setRot(r => ({ ...r, z: Math.max(0.3, +(r.z / 1.25).toFixed(2)) })), children: '−' }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => setRot(r => ({ ...r, z: Math.min(5, +(r.z * 1.25).toFixed(2)) })), children: '+' }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => setRot({ x: 0.5, y: 0.6, z: 1 }), children: t('resetView') }),
+    ] }),
+  ] })
+}
+
+function TrashPreview({ ctx, t, entry, refetch, select }) {
+  const [busy, setBusy] = useState(false)
+  const doRestore = async () => {
+    setBusy(true)
+    try {
+      const r = await ctx.rest('/trash-restore', { method: 'POST', timeoutMs: 60000, body: { id: entry.path } })
+      if (!r?.ok) hostNotify(ctx, 'restore failed')
+      select(null)
+      refetch()
+    } catch (e) { hostNotify(ctx, String((e && e.message) || e)) }
+    setBusy(false)
+  }
+  return jsxs('div', { className: 'hermes-fb-preview', children: [
+    jsxs('div', { className: 'hermes-fb-opsbar', children: [
+      jsx('span', { style: { fontSize: 12, fontWeight: 600 }, children: entry.name }),
+      jsx('span', { style: { flex: 1 } }),
+      jsx('button', { className: 'hermes-fb-tbtn', style: { width: 20, height: 20, fontSize: 12 }, title: t('closePreview'), onClick: () => select(null), children: '×' }),
+    ] }),
+    jsxs('div', { className: 'hermes-fb-kv', children: [jsx('span', { children: t('origPath') }), jsx('b', { children: entry.orig || '—' })] }),
+    jsxs('div', { className: 'hermes-fb-kv', children: [jsx('span', { children: t('deletedOn') }), jsx('b', { children: entry.deleted ? fmtDate(entry.deleted) : '—' })] }),
+    jsxs('div', { className: 'hermes-fb-kv', children: [jsx('span', { children: 'Size' }), jsx('b', { children: entry.is_dir ? '—' : fmtSize(entry.size) })] }),
+    jsxs('div', { className: 'hermes-fb-actions', children: [
+      jsx(Button, { size: 'micro', onClick: doRestore, disabled: busy, children: t('restore') }),
+    ] }),
+  ] })
+}
+
+function Lightbox({ ctx, t, images, index, onNav, onClose }) {
+  const entry = images[index]
+  const [zoom, setZoom] = useState(1)
+  useEffect(() => { setZoom(1) }, [entry && entry.path])
+  const big = useQuery({
+    queryKey: [ID, '/thumb', entry && entry.path, 1200, entry && entry.mtime],
+    queryFn: ({ signal }) => ctx.rest('/thumb', { method: 'POST', timeoutMs: 60000, signal, body: { path: entry.path, size: 1200 } }),
+    enabled: !!entry,
+    staleTime: 300000,
+    retry: false,
+  })
+  const info = useQuery({
+    queryKey: [ID, '/imginfo', entry && entry.path, entry && entry.mtime],
+    queryFn: ({ signal }) => ctx.rest('/imginfo', { method: 'POST', timeoutMs: 30000, signal, body: { path: entry.path } }),
+    enabled: !!entry,
+    staleTime: 300000,
+    retry: false,
+  })
+  if (!entry) return null
+  const meta = info.data?.ok
+    ? `${info.data.width}×${info.data.height} · ${info.data.format}${info.data.exif && info.data.exif.camera ? ` · ${info.data.exif.camera}` : ''}${info.data.exif && info.data.exif.taken ? ` · ${info.data.exif.taken}` : ''}`
+    : fmtSize(entry.size)
+  const keys = ev => {
+    if (ev.key === 'Escape') onClose()
+    else if (ev.key === 'ArrowRight') onNav((index + 1) % images.length)
+    else if (ev.key === 'ArrowLeft') onNav((index - 1 + images.length) % images.length)
+    else if (ev.key === '+' || ev.key === '=') setZoom(z => Math.min(4, +(z + 0.25).toFixed(2)))
+    else if (ev.key === '-') setZoom(z => Math.max(0.25, +(z - 0.25).toFixed(2)))
+    else if (ev.key === '0') setZoom(1)
+  }
+  return jsxs('div', { className: 'hermes-fb-lb', tabIndex: 0, autoFocus: true, onKeyDown: keys, children: [
+    jsxs('div', { className: 'hermes-fb-lbhead', children: [
+      jsx('span', { style: { fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: entry.name }),
+      jsx('span', { style: { color: '#888', whiteSpace: 'nowrap' }, children: meta }),
+      jsx('span', { style: { flex: 1 } }),
+      jsx('span', { style: { color: '#888' }, children: `${index + 1} / ${images.length}` }),
+      jsx('button', { className: 'hermes-fb-tbtn', title: t('zoomOut'), onClick: () => setZoom(z => Math.max(0.25, +(z - 0.25).toFixed(2))), children: '−' }),
+      jsx('button', { className: 'hermes-fb-tbtn', title: t('zoomReset'), onClick: () => setZoom(1), children: `${Math.round(zoom * 100)}%` }),
+      jsx('button', { className: 'hermes-fb-tbtn', title: t('zoomIn'), onClick: () => setZoom(z => Math.min(4, +(z + 0.25).toFixed(2))), children: '+' }),
+      images.length > 1 && jsx('button', { className: 'hermes-fb-tbtn', onClick: () => onNav((index - 1 + images.length) % images.length), children: '‹' }),
+      images.length > 1 && jsx('button', { className: 'hermes-fb-tbtn', onClick: () => onNav((index + 1) % images.length), children: '›' }),
+      jsx('button', { className: 'hermes-fb-tbtn', title: t('closePreview'), onClick: onClose, children: '×' }),
+    ] }),
+    jsx('div', { className: 'hermes-fb-lbbody', children:
+      big.isError
+        ? jsx('div', { className: 'hermes-fb-error', children: t('mediaBlocked') })
+        : !big.data?.data_url
+          ? jsx(GlyphSpinner, { ariaLabel: entry.name })
+          : jsx('img', { src: big.data.data_url, alt: entry.name, style: zoom === 1 ? { maxWidth: '100%', maxHeight: '100%' } : { width: `${zoom * 100}%`, maxWidth: 'none', cursor: 'zoom-out' }, onClick: () => { if (zoom !== 1) setZoom(1) } }),
+    }),
+  ] })
+}
+
+function Preview({ ctx, t, entry, refetch, select, onExpand }) {
+  if (entry.path.startsWith('trash://')) return jsx(TrashPreview, { ctx, t, entry, refetch, select })
+  const isImg = IMG_EXTS.has(entry.ext)
+  const isAudio = AUD_EXTS.has(entry.ext)
+  const isVideo = VID_EXTS.has(entry.ext)
+  const isModel = MODEL_EXTS.has(entry.ext)
+  const isTextish = !entry.is_dir && !isImg && !isAudio && !isVideo && !isModel && entry.ext !== '.pdf'
+  const isPdf = !entry.is_dir && entry.ext === '.pdf'
+  const [mediaErr, setMediaErr] = useState(false)
+  const [dlFallback, setDlFallback] = useState(false)
+  const mediaSrc = dlFallback ? fileDlUrl(entry.path) : fileUrl(entry.path)
+  const onMediaError = () => { if (!dlFallback) setDlFallback(true); else setMediaErr(true) }
+  const [fullRead, setFullRead] = useState(false)
+  const [editMode, setEditMode] = useState(false)
+  const [editText, setEditText] = useState('')
+  const doSaveEdit = async () => {
+    setOpBusy(true)
+    try {
+      const r = await ctx.rest('/write', { method: 'POST', timeoutMs: 30000, body: { path: entry.path, text: editText } })
+      setOpBusy(false)
+      if (!r?.ok) { opErr((r && r.error) || 'save failed'); return }
+      setEditMode(false)
+      refetch()
+    } catch (e) { opErr(e); setOpBusy(false) }
+  }
+  const [renameMode, setRenameMode] = useState(false)
+  const [renameName, setRenameName] = useState(entry.name)
+  const [confirmDel, setConfirmDel] = useState(false)
+  const [opBusy, setOpBusy] = useState(false)
+  const clip = useValue(clipboard)
+  const opErr = e => hostNotify(ctx, String((e && e.data && e.data.error) || (e && e.message) || e))
+  if (pendingRename.get() === entry.path) { pendingRename.set(null); if (!renameMode) { setRenameName(entry.name); setConfirmDel(false); setRenameMode(true) } }
+  if (pendingDelete.get() === entry.path) { pendingDelete.set(null); if (!confirmDel) setConfirmDel(true) }
+  const doPasteHere = async () => {
+    const c = clipboard.get()
+    const dest = entry.path.replace(/[/\\][^/\\]+$/, '') || entry.path
+    setOpBusy(true)
+    try {
+      if (c && c.paths?.length) {
+        const r = await runJob(ctx, c.mode === 'cut' ? 'move' : 'copy', { paths: c.paths, dest_dir: dest }, c.mode === 'cut' ? t('jobMove', c.paths.length) : t('jobCopy', c.paths.length))
+        if (!r?.ok) opErr((r?.error || r?.failed?.[0]?.error) || 'paste failed')
+        else if (c.mode === 'cut') clipboard.set(null)
+      } else {
+        const r = await ctx.rest('/paste-os', { method: 'POST', timeoutMs: 120000, body: { dest } })
+        if (!r?.ok) opErr(t('nothingToPaste'))
+      }
+      refetch()
+    } catch (e) { opErr(e) }
+    setOpBusy(false)
+  }
+  const doRename = async () => {
+    const name = (renameName || '').trim()
+    if (!name || name === entry.name) { setRenameMode(false); return }
+    setOpBusy(true)
+    try {
+      const r = await ctx.rest('/rename', { method: 'POST', timeoutMs: 15000, body: { path: entry.path, new_name: name } })
+      setRenameMode(false)
+      refetch()
+      if (r?.path) select(r.path)
+    } catch (e) { opErr(e) }
+    setOpBusy(false)
+  }
+  const doDelete = async () => {
+    if (!confirmDel) { setConfirmDel(true); return }
+    setOpBusy(true)
+    try {
+      let r = await ctx.rest('/delete', { method: 'POST', timeoutMs: 30000, body: { paths: [entry.path] } })
+      if (!r || typeof r.ok !== 'boolean') {
+        r = await ctx.rest('/api/plugins/athena/files/delete', { method: 'POST', timeoutMs: 30000, body: { paths: [entry.path] } })
+      }
+      if (!r?.ok) {
+        opErr((r?.failed?.[0]?.error) || 'delete failed — the file is still there')
+        setConfirmDel(false)
+        setOpBusy(false)
+        return
+      }
+      select(null)
+      refetch()
+    } catch (e) { opErr(e) }
+    setConfirmDel(false)
+    setOpBusy(false)
+  }
+  const doZip = async () => {
+    setOpBusy(true)
+    try {
+      const r = await runJob(ctx, 'zip', { paths: [entry.path] }, t('jobZip', 1))
+      if (r && r.error && !r.job_id) opErr(r.error)
+      refetch()
+    } catch (e) { opErr(e) }
+    setOpBusy(false)
+  }
+  const doExtract = async () => {
+    setOpBusy(true)
+    try {
+      const r = await runJob(ctx, 'extract', { path: entry.path }, t('jobExtract', entry.name))
+      if (r?.path) hostNotify(ctx, 'Extracted to ' + r.path)
+      else if (r && !r.ok) opErr(r.error || 'extract failed')
+      refetch()
+    } catch (e) { opErr(e) }
+    setOpBusy(false)
+  }
+  const thumb = useQuery({
+    queryKey: [ID, 'thumb', entry.path, entry.mtime, 'pv'],
+    queryFn: ({ signal }) => ctx.rest('/thumb', { method: 'POST', timeoutMs: 15000, signal, body: { path: entry.path, size: 512 } }),
+    enabled: isImg,
+    staleTime: 300000,
+    retry: false,
+  })
+  const text = useQuery({
+    queryKey: [ID, 'read', entry.path, entry.mtime],
+    queryFn: ({ signal }) => ctx.rest('/read', { method: 'POST', timeoutMs: 15000, signal, body: { path: entry.path, max_kb: 64 } }),
+    enabled: isTextish && entry.size < 2 * 1024 * 1024,
+    staleTime: 60000,
+    retry: false,
+  })
+  const full = useQuery({
+    queryKey: [ID, 'readfull', entry.path, entry.mtime],
+    queryFn: ({ signal }) => ctx.rest('/read', { method: 'POST', timeoutMs: 20000, signal, body: { path: entry.path, max_kb: 1024 } }),
+    enabled: fullRead && isTextish,
+    staleTime: 60000,
+    retry: false,
+  })
+  // NB: editBase must stay BELOW the text/full queries — it reads their data
+  // (a use-before-declaration here crashes the whole pane on every click).
+  const editBase = fullRead ? full.data : text.data
+  const canEdit = isTextish && !entry.is_dir && entry.size < 256 * 1024 && !!editBase && !editBase.is_binary
+  const startEdit = () => { setEditText(editBase.text || ''); setEditMode(true) }
+  const openFile = async () => {
+    const url = `file:///${entry.path.replace(/\\/g, '/')}`
+    try {
+      const ok = await ctx.os.openExternal(url)
+      if (!ok) throw new Error('no handler')
+    } catch {
+      try { await ctx.os.revealPath(entry.path.replace(/[/\\][^/\\]+$/, '') || entry.path) } catch { /* noop */ }
+      hostNotify(ctx, t('openFailed'))
+    }
+  }
+  return jsxs('div', { className: 'hermes-fb-preview', children: [
+    jsxs('div', { className: 'hermes-fb-opsbar', children: [
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => ctx.os.writeClipboard(entry.path), children: t('copyPath') }),
+      renameMode && jsx('input', { value: renameName, onChange: e => setRenameName(e.target.value), onKeyDown: e => { if (e.key === 'Enter') doRename() }, autoFocus: true, 'aria-label': t('rename'), style: { flex: 1, minWidth: 60, height: 24, fontSize: 12, padding: '0 6px', borderRadius: 4, border: '1px solid var(--ui-stroke-secondary)', background: 'transparent', color: 'var(--ui-text-primary)' } }),
+      renameMode && jsx(Button, { size: 'micro', onClick: doRename, disabled: opBusy, children: t('save') }),
+      renameMode && jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => setRenameMode(false), children: t('cancel') }),
+      !renameMode && jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => { setRenameName(entry.name); setConfirmDel(false); setRenameMode(true) }, children: t('rename') }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => clipboard.set({ mode: 'copy', paths: [entry.path], label: entry.name }), children: t('copy') }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => clipboard.set({ mode: 'cut', paths: [entry.path], label: entry.name }), children: t('cut') }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: doPasteHere, disabled: opBusy, children: t('paste') }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: doDelete, disabled: opBusy, children: confirmDel ? t('confirmDelete') : t('delete') }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: doZip, disabled: opBusy, children: t('compress') }),
+      entry.ext === '.zip' && jsx(Button, { size: 'micro', variant: 'ghost', onClick: doExtract, disabled: opBusy, children: t('extract') }),
+      canEdit && !editMode && jsx(Button, { size: 'micro', variant: 'ghost', onClick: startEdit, children: t('editFile') }),
+      jsx('span', { style: { flex: 1 } }),
+      jsx('button', { className: 'hermes-fb-tbtn', style: { width: 20, height: 20, fontSize: 12 }, title: t('closePreview'), onClick: () => select(null), children: '×' }),
+    ] }),
+    jsxs('div', { className: 'hermes-fb-kv', children: [jsx('span', { children: t('details') }), jsx('b', { children: entry.name })] }),
+    jsxs('div', { className: 'hermes-fb-kv', children: [jsx('span', { children: 'Size' }), jsx('b', { children: entry.is_dir ? '—' : fmtSize(entry.size) })] }),
+    jsxs('div', { className: 'hermes-fb-kv', children: [jsx('span', { children: 'Modified' }), jsx('b', { children: fmtDate(entry.mtime) })] }),
+    isImg && thumb.data?.data_url && jsx('img', { src: thumb.data.data_url, alt: entry.name, loading: 'lazy', style: onExpand ? { cursor: 'zoom-in' } : undefined, onClick: onExpand }),
+    isAudio && !mediaErr && jsx('audio', { key: mediaSrc, controls: true, preload: 'metadata', src: mediaSrc, style: { width: '100%', marginTop: 4 }, onError: onMediaError }),
+    isVideo && !mediaErr && jsx('video', { key: mediaSrc, controls: true, preload: 'metadata', src: mediaSrc, style: { width: '100%', maxHeight: 240, background: '#000', borderRadius: 6, marginTop: 4 }, onError: onMediaError }),
+    (isAudio || isVideo) && mediaErr && jsx('div', { className: 'hermes-fb-error', children: t('mediaBlocked') }),
+    isPdf && !mediaErr && jsx('iframe', { src: fileUrl(entry.path), title: entry.name, style: { width: '100%', height: 480, border: 0, borderRadius: 6, marginTop: 4, background: '#fff' }, onError: () => setMediaErr(true) }),
+    isPdf && mediaErr && jsx('div', { className: 'hermes-fb-error', children: t('mediaBlocked') }),
+    isModel && jsx(ModelView, { ctx, t, entry }),
+    isTextish && text.data && !fullRead && !editMode && (text.data.is_binary
+      ? jsx('div', { className: 'hermes-fb-error', children: t('binaryFile') })
+      : jsxs('div', { children: [
+        jsx('pre', { children: (text.data.text || '') + (text.data.truncated ? '…' : '') }),
+        text.data.truncated && jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => setFullRead(true), children: t('readFull') }),
+      ] })),
+    isTextish && fullRead && !editMode && jsxs('div', { children: [
+      full.isFetching && jsx(GlyphSpinner, { ariaLabel: t('readFull') }),
+      full.data && !full.data.is_binary && jsx('pre', { children: (full.data.text || '') + (full.data.truncated ? '…' : '') }),
+      full.data && full.data.is_binary && jsx('div', { className: 'hermes-fb-error', children: t('binaryFile') }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => setFullRead(false), children: t('showLess') }),
+    ] }),
+    isTextish && editMode && jsxs('div', { children: [
+      jsx('textarea', { value: editText, onChange: e => setEditText(e.target.value), spellCheck: false, style: { width: '100%', minHeight: 220, fontSize: 11, lineHeight: '15px', fontFamily: 'inherit', whiteSpace: 'pre', background: 'transparent', color: 'var(--ui-text-primary)', border: '1px solid var(--ui-stroke-secondary)', borderRadius: 6, padding: 6, marginTop: 4 } }),
+      jsxs('div', { className: 'hermes-fb-actions', children: [
+        jsx(Button, { size: 'micro', onClick: doSaveEdit, disabled: opBusy, children: t('save') }),
+        jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => setEditMode(false), children: t('cancel') }),
+      ] }),
+    ] }),
+    jsxs('div', { className: 'hermes-fb-actions', children: [
+      !entry.is_dir && jsx(Button, { size: 'micro', onClick: openFile, children: t('openFile') }),
+      isImg && onExpand && jsx(Button, { size: 'micro', variant: 'ghost', onClick: onExpand, children: t('expand') }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => ctx.os.revealPath(entry.is_dir ? entry.path : entry.path.replace(/[/\\][^/\\]+$/, '')), children: t('reveal') }),
+    ] }),
+  ] })
+}
+
+function hostNotify(ctx, message) {
+  try {
+    if (ctx.host && typeof ctx.host.notify === 'function') ctx.host.notify({ kind: 'info', message })
+  } catch { /* noop */ }
+}
+
+function PropsPanel({ ctx, t, path, onClose }) {
+  const [calc, setCalc] = useState(false)
+  const q = useQuery({
+    queryKey: [ID, 'stat', path, calc],
+    queryFn: ({ signal }) => ctx.rest('/stat', { method: 'POST', timeoutMs: 120000, signal, body: { path, dir_size: calc } }),
+    retry: false,
+  })
+  const d = q.data
+  const ds = d?.dir_size
+  const rows = d?.ok ? [
+    [t('location'), d.path],
+    [t('type'), d.is_dir ? t('kindFolder') : ((d.ext || 'file').replace(/^\./, '').toUpperCase() + ' file')],
+    [t('size'), d.is_dir ? (ds ? `${fmtSize(ds.bytes)} · ${ds.files} files · ${ds.dirs} folders${ds.capped ? ' (partial)' : ''}` : null) : fmtSize(d.size)],
+    [t('modified'), fmtDate(d.mtime)],
+    [t('created'), fmtDate(d.ctime)],
+    [t('hidden'), d.hidden ? t('yes') : t('no')],
+  ] : null
+  return jsxs('div', { className: 'hermes-fb-preview', tabIndex: 0, autoFocus: true, onKeyDown: ev => { if (ev.key === 'Escape') onClose() }, children: [
+    jsxs('div', { className: 'hermes-fb-opsbar', children: [
+      jsx('span', { style: { fontSize: 12, fontWeight: 600 }, children: `${t('properties')} — ${d?.name || ''}` }),
+      jsx('span', { style: { flex: 1 } }),
+      jsx('button', { className: 'hermes-fb-tbtn', style: { width: 20, height: 20, fontSize: 12 }, title: t('closePreview'), onClick: onClose, children: '×' }),
+    ] }),
+    q.isError && jsx('div', { className: 'hermes-fb-error', children: t('backendDown') }),
+    !q.isError && !d && jsx(GlyphSpinner, { ariaLabel: t('checkingUpdate') }),
+    rows && rows.map(([k, v], i) => jsx('div', { className: 'hermes-fb-kv', children: [jsx('span', { children: k }), jsx('b', { children: v == null ? (k === t('size') ? jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => setCalc(true), children: calc ? t('checkingUpdate') : t('calcSize') }) : '—') : String(v) })] }, i)),
+    d?.is_dir && !ds && jsx('div', { style: { fontSize: 10, color: 'var(--ui-text-quaternary)' }, children: t('calcNote') }),
+  ] })
+}
+
+function MultiPanel({ ctx, t, entries, cwd, clearSel, refresh }) {
+  const [confirmDel, setConfirmDel] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const paths = entries.map(x => x.path)
+  const totalSize = entries.reduce((a, x) => a + (x.is_dir ? 0 : (x.size || 0)), 0)
+  const run = async fn => {
+    setBusy(true)
+    try { await fn(); clearSel(); refresh() } catch (e) { hostNotify(ctx, String((e && e.message) || e)) }
+    setBusy(false)
+    setConfirmDel(false)
+  }
+  const doCopy = () => { clipboard.set({ mode: 'copy', paths, label: `${entries.length} items` }) }
+  const doCut = () => { clipboard.set({ mode: 'cut', paths, label: `${entries.length} items` }) }
+  const doZip = () => run(async () => {
+    const r = await runJob(ctx, 'zip', { paths }, t('jobZip', paths.length))
+    if (!r?.ok) throw new Error(r?.error || (r?.failed?.[0]?.error) || 'compress failed')
+  })
+  const doDelete = () => {
+    if (!confirmDel) { setConfirmDel(true); return }
+    run(async () => {
+      let r = await ctx.rest('/delete', { method: 'POST', timeoutMs: 120000, body: { paths } })
+      if (!r || typeof r.ok !== 'boolean') {
+        r = await ctx.rest('/api/plugins/athena/files/delete', { method: 'POST', timeoutMs: 120000, body: { paths } })
+      }
+      if (!r?.ok) throw new Error((r?.failed?.[0]?.error) || 'delete failed — the files are still there')
+    })
+  }
+  return jsxs('div', { className: 'hermes-fb-preview', children: [
+    jsxs('div', { className: 'hermes-fb-opsbar', children: [
+      jsx('span', { style: { fontSize: 12, fontWeight: 600 }, children: t('selectedN', entries.length, fmtSize(totalSize)) }),
+      jsx('span', { style: { flex: 1 } }),
+      jsx('button', { className: 'hermes-fb-tbtn', style: { width: 20, height: 20, fontSize: 12 }, title: t('clear'), onClick: clearSel, children: '×' }),
+    ] }),
+    jsxs('div', { className: 'hermes-fb-actions', children: [
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: doCopy, disabled: busy, children: t('copy') }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: doCut, disabled: busy, children: t('cut') }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: doDelete, disabled: busy, children: confirmDel ? t('confirmDelete') : t('delete') }),
+      jsx(Button, { size: 'micro', variant: 'ghost', onClick: doZip, disabled: busy, children: t('compress') }),
+    ] }),
+  ] })
+}
+
+const MIME_BY_EXT = { mp3: 'audio/mpeg', wav: 'audio/wav', flac: 'audio/flac', m4a: 'audio/mp4', ogg: 'audio/ogg', opus: 'audio/opus', mp4: 'video/mp4', mkv: 'video/x-matroska', avi: 'video/x-msvideo', mov: 'video/quicktime', webm: 'video/webm', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', bmp: 'image/bmp', webp: 'image/webp', pdf: 'application/pdf', zip: 'application/zip', txt: 'text/plain' }
+function dlUrl(path, name) {
+  const ext = String(name).split('.').pop().toLowerCase()
+  const mime = MIME_BY_EXT[ext] || 'application/octet-stream'
+  const base = (typeof window !== 'undefined' && window.location && window.location.origin) || ''
+  return `${mime}:${name}:${base}/api/plugins/hermes-filebox/dl?path=${encodeURIComponent(path)}`
+}
+
+function TabPane({ ctx, tabId, initialCwd, sort, setSort, tilePx, setTilePx, showHidden, setShowHidden, sideWidth, setSideWidth, sideCollapsed, setSideCollapsed, sideOrder, setSideOrder, previewH, setPreviewH, viewMode, setViewMode, hidden, onCwd }) {
+  const t = usePluginI18n(ID)
+  const [cwd, setCwd] = useState(initialCwd || null)
+  const [back, setBack] = useState([])
+  const [fwd, setFwd] = useState([])
+  const [sel, setSel] = useState([])
+  const anchorRef = useRef(null)
+  const clearSel = () => { setSel([]); anchorRef.current = null }
+  const [propPath, setPropPath] = useState(null)
+  const [lbIdx, setLbIdx] = useState(null)
+  const [addrEdit, setAddrEdit] = useState(false)
+  const [addrVal, setAddrVal] = useState('')
+  const goAddr = async () => {
+    const p = addrVal.trim()
+    setAddrEdit(false)
+    if (!p || p === cwd) return
+    try {
+      const r = await ctx.rest('/stat', { method: 'POST', timeoutMs: 15000, body: { path: p } })
+      if (!r?.ok) { hostNotify(ctx, t('pathNotFound')); return }
+      if (!r.is_dir) {
+        hostNotify(ctx, t('notFolder'))
+        nav(parentDir(p))
+        setSel([r.path || p])
+        return
+      }
+      nav(r.path || p)
+    } catch (e) { hostNotify(ctx, String((e && e.message) || e)) }
+  }
+  const [search, setSearch] = useState('')
+  // Debounced deep search: 2+ chars searches filenames under cwd recursively.
+  // The instant filter still applies immediately; deep results replace it on arrival.
+  const [deepQ, setDeepQ] = useState('')
+  useEffect(() => {
+    const q = search.trim()
+    if (q.length < 2 || cwd === 'trash://') { setDeepQ(''); return }
+    const id = setTimeout(() => setDeepQ(q), 350)
+    return () => clearTimeout(id)
+  }, [search, cwd])
+  const [pins, setPins] = useState(() => ctx.storage.get('pins', null))
+  const [mkdirMode, setMkdirMode] = useState(false)
+  const [mkdirName, setMkdirName] = useState('')
+  const [dropPath, setDropPath] = useState(null)
+  const bump = useValue(dirBump)
+
+  const roots = useQuery({
+    queryKey: [ID, 'roots'],
+    queryFn: ({ signal }) => ctx.rest('/roots', { method: 'POST', timeoutMs: 15000, signal, body: {} }),
+    staleTime: 600000,
+    retry: false,
+  })
+
+  const home = roots.data?.home || null
+  const pinsEffective = pins || (home ? [home] : [])
+
+  const list = useQuery({
+    queryKey: [ID, 'list', cwd, showHidden, bump],
+    queryFn: async ({ signal }) => {
+      if (cwd === 'trash://') {
+        const r = await ctx.rest('/trash', { method: 'POST', timeoutMs: 20000, signal, body: {} })
+        const items = Array.isArray(r?.items) ? r.items : []
+        return { entries: items, total: items.length, parent: null }
+      }
+      return ctx.rest('/list', { method: 'POST', timeoutMs: 20000, signal, body: { path: cwd, show_hidden: showHidden } })
+    },
+    enabled: !!cwd,
+    staleTime: 10000,
+    retry: false,
+  })
+  const [grepMode, setGrepMode] = useState(false)
+  const isTrash = cwd === 'trash://'
+  const deepActive = !isTrash && deepQ.length >= 2 && !grepMode && !zipView
+  const deep = useQuery({
+    queryKey: [ID, 'search', cwd, deepQ, showHidden],
+    queryFn: ({ signal }) => ctx.rest('/search', { method: 'POST', timeoutMs: 60000, signal, body: { root: cwd, query: deepQ, show_hidden: showHidden } }),
+    enabled: !!cwd && deepActive,
+    staleTime: 30000,
+    retry: false,
+  })
+  const grepActive = grepMode && !isTrash && deepQ.length >= 2 && !zipView
+  const grep = useQuery({
+    queryKey: [ID, 'grep', cwd, deepQ, showHidden],
+    queryFn: ({ signal }) => ctx.rest('/grep', { method: 'POST', timeoutMs: 120000, signal, body: { root: cwd, pattern: deepQ, show_hidden: showHidden } }),
+    enabled: !!cwd && grepActive,
+    staleTime: 30000,
+    retry: false,
+  })
+  const grepShowing = grepActive && !!grep.data?.hits
+  const [zipView, setZipView] = useState(null)
+  const zipList = useQuery({
+    queryKey: [ID, 'ziplist', zipView && zipView.zip],
+    queryFn: ({ signal }) => ctx.rest('/ziplist', { method: 'POST', timeoutMs: 60000, signal, body: { path: zipView.zip } }),
+    enabled: !!zipView,
+    staleTime: 60000,
+    retry: false,
+  })
+  const zEntries = useMemo(() => {
+    if (!zipView || !zipList.data?.members) return []
+    const prefix = zipView.inner ? zipView.inner + '/' : ''
+    const seen = new Set()
+    const out = []
+    for (const m of zipList.data.members) {
+      if (!m.name.startsWith(prefix)) continue
+      const rest = m.name.slice(prefix.length)
+      if (!rest) continue
+      const slash = rest.indexOf('/')
+      if (slash === -1) {
+        out.push({ name: rest, path: `zipview://${zipView.zip}//${m.name}`, is_dir: false, size: m.size, mtime: m.mtime, ext: rest.includes('.') ? rest.slice(rest.lastIndexOf('.')).toLowerCase() : '', member: m.name })
+      } else {
+        const d = rest.slice(0, slash)
+        if (!seen.has(d)) {
+          seen.add(d)
+          out.push({ name: d, path: `zipview://${zipView.zip}//${prefix}${d}`, is_dir: true, size: 0, mtime: 0, ext: '', member: prefix + d })
+        }
+      }
+    }
+    return out
+  }, [zipView, zipList.data])
+  const memberOpen = async e => {
+    if (!zipView || e.is_dir) return
+    try {
+      const r = await ctx.rest('/zextract', { method: 'POST', timeoutMs: 60000, body: { path: zipView.zip, member: e.member } })
+      if (!r?.ok) { hostNotify(ctx, (r && r.error) || 'extract failed'); return }
+      const url = `file:///${String(r.path).replace(/\\/g, '/')}`
+      try {
+        const ok = await ctx.os.openExternal(url)
+        if (!ok) throw new Error('no handler')
+      } catch {
+        try { await ctx.os.revealPath(String(r.path).replace(/[/\\][^/\\]+$/, '') || r.path) } catch { /* noop */ }
+      }
+    } catch (err) { hostNotify(ctx, String((err && err.message) || err)) }
+  }
+  const extractAllHere = async () => {
+    if (!zipView || !cwd || isTrash) return
+    try {
+      const r = await runJob(ctx, 'extract', { path: zipView.zip, dest_dir: cwd }, t('jobExtract', zipBase))
+      if (!r?.ok) hostNotify(ctx, (r && (r.error || (r.failed && r.failed[0] && r.failed[0].error))) || 'extract failed')
+      else { list.refetch(); hostNotify(ctx, r.path) }
+    } catch (e) { hostNotify(ctx, String((e && e.message) || e)) }
+  }
+  const job = useValue(activeJob)
+  const jobSt = useValue(jobStatus)
+  useEffect(() => {
+    if (!job) return
+    let dead = false
+    const tick = async () => {
+      try {
+        const s = await ctx.rest('/jobstatus', { method: 'POST', timeoutMs: 15000, body: { job_id: job.id } })
+        if (dead || !s || s.error) return
+        jobStatus.set(s)
+        if ((s.state === 'completed' || s.state === 'cancelled' || s.state === 'failed') && !jobDoneFlag) {
+          jobDoneFlag = true
+          list.refetch()
+          dirBump.set(dirBump.get() + 1)
+          if (jobResolve) { const r = jobResolve; jobResolve = null; r(s.result ?? s) }
+        }
+      } catch { /* gateway restarting — keep polling */ }
+    }
+    tick()
+    const iv = setInterval(tick, 500)
+    return () => { dead = true; clearInterval(iv) }
+  }, [job])
+  const [emptyConfirm, setEmptyConfirm] = useState(false)
+  const doEmptyTrash = async () => {
+    if (!emptyConfirm) { setEmptyConfirm(true); return }
+    setEmptyConfirm(false)
+    try {
+      const r = await ctx.rest('/trash-empty', { method: 'POST', timeoutMs: 120000, body: {} })
+      if (!r?.ok) hostNotify(ctx, 'empty failed')
+      clearSel()
+      list.refetch()
+    } catch (e) { hostNotify(ctx, String((e && e.message) || e)) }
+  }
+
+  const nav = (path, push = true) => {
+    if (!path || path === cwd) return
+    if (push && cwd) {
+      setBack(b => [...b.slice(-49), cwd])
+      setFwd([])
+    }
+    setCwd(path)
+    clearSel()
+    setPropPath(null)
+    setAddrEdit(false)
+    setZipView(null)
+    setSearch('')
+  }
+
+  const goBack = () => {
+    if (zipView) {
+      if (zipView.inner) setZipView({ zip: zipView.zip, inner: zipView.inner.split('/').slice(0, -1).join('/') })
+      else setZipView(null)
+      clearSel()
+      return
+    }
+    if (!back.length) return
+    const prev = back[back.length - 1]
+    setBack(b => b.slice(0, -1))
+    if (cwd) setFwd(f => [cwd, ...f].slice(0, 50))
+    setCwd(prev)
+    clearSel()
+    setSearch('')
+  }
+
+  const goFwd = () => {
+    if (!fwd.length) return
+    const [next, ...rest] = fwd
+    setFwd(rest)
+    if (cwd) setBack(b => [...b.slice(-49), cwd])
+    setCwd(next)
+    clearSel()
+    setSearch('')
+  }
+
+  const entries = useMemo(() => {
+    // Deep results replace the folder filter once they arrive; until then
+    // the instant filter covers the current folder with zero latency.
+    const all = zipView ? zEntries : ((deepActive && deep.data?.entries) ? deep.data.entries : (list.data?.entries ?? []))
+    const q = search.trim().toLowerCase()
+    const filtered = (deepActive && deep.data?.entries) ? all : (q ? all.filter(e => e.name.toLowerCase().includes(q)) : all)
+    const cmp = {
+      name: (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }),
+      size: (a, b) => (b.size - a.size) || a.name.localeCompare(b.name),
+      mtime: (a, b) => (b.mtime - a.mtime) || a.name.localeCompare(b.name),
+      type: (a, b) => (a.ext.localeCompare(b.ext)) || a.name.localeCompare(b.name),
+    }[sort] || ((a, b) => 0)
+    return [...filtered].sort((a, b) => ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) || cmp(a, b))
+  }, [list.data, search, sort, deepActive, deep.data, zipView, zEntries])
+
+  const deepShowing = deepActive && !!deep.data?.entries
+  const total = deepShowing ? (deep.data.total ?? entries.length) : (list.data?.total ?? entries.length)
+  const [renderCount, setRenderCount] = useState(RENDER_CAP)
+  useEffect(() => { setRenderCount(RENDER_CAP) }, [cwd, search, sort, deepShowing, grepShowing, zipView])
+  const shown = entries.slice(0, renderCount)
+  const growOnScroll = e => {
+    try {
+      const el = e.currentTarget
+      if (el.scrollTop + el.clientHeight > el.scrollHeight - 600 && renderCount < entries.length) {
+        setRenderCount(Math.min(entries.length, renderCount + 400))
+      }
+    } catch { /* noop */ }
+  }
+  const zipBase = zipView ? String(zipView.zip).split(/[/\\]+/).filter(Boolean).pop() : ''
+  const crumbs = zipView ? [zipBase, ...String(zipView.inner || '').split('/').filter(Boolean)] : (isTrash ? ['Recycle Bin'] : (cwd ? splitPath(cwd) : []))
+  const zipGo = i => {
+    if (!zipView) return
+    setZipView({ zip: zipView.zip, inner: crumbs.slice(1, i + 1).join('/') })
+    clearSel()
+  }
+  const selEntry = sel.length === 1 ? entries.find(e => e.path === sel[0]) : null
+  const selEntries = sel.map(p => entries.find(e => e.path === p)).filter(Boolean)
+  const images = entries.filter(e => IMG_EXTS.has(e.ext))
+  const openLb = () => {
+    if (!selEntry || !IMG_EXTS.has(selEntry.ext)) return
+    const i = images.findIndex(x => x.path === selEntry.path)
+    setLbIdx(i >= 0 ? i : 0)
+  }
+  const selectProp = v => { if (v) { setSel([v]) } else { clearSel() } }
+  // Click gestures: plain = single, Ctrl/Cmd = toggle, Shift = range from anchor
+  const clickSel = (entry, idx, ev) => {
+    if (ev && ev.shiftKey && anchorRef.current != null && shown[anchorRef.current]) {
+      const a = anchorRef.current
+      const [lo, hi] = a < idx ? [a, idx] : [idx, a]
+      setSel(shown.slice(lo, hi + 1).map(x => x.path))
+      return
+    }
+    if (ev && (ev.ctrlKey || ev.metaKey)) {
+      anchorRef.current = idx
+      setSel(s => s.includes(entry.path) ? s.filter(p => p !== entry.path) : [...s, entry.path])
+      return
+    }
+    anchorRef.current = idx
+    setSel(s => (s.length === 1 && s[0] === entry.path) ? [] : [entry.path])
+  }
+  const pinned = cwd && pinsEffective.includes(cwd)
+  // Sidebar: pins + recycle bin + drives in one draggable list. Order
+  // persists (sideOrder); unknown ids (new pins/drives) append at the end.
+  const sideItems = (() => {
+    const items = [
+      ...pinsEffective.map(p => ({ id: `pin:${p}`, kind: 'pin', path: p })),
+      { id: 'trash:bin', kind: 'trash', path: 'trash://' },
+      ...(roots.data?.drives ?? []).map(d => ({ id: `drive:${d.mount}`, kind: 'drive', path: d.mount, drive: d })),
+    ]
+    if (!Array.isArray(sideOrder)) return items
+    const pos = new Map(sideOrder.map((id, i) => [id, i]))
+    const rank = it => (pos.has(it.id) ? pos.get(it.id) : 1e9)
+    return [...items].sort((a, b) => rank(a) - rank(b))
+  })()
+  const moveSideItem = (fromId, toId) => {
+    if (!fromId || !toId || fromId === toId) return
+    const ids = sideItems.map(x => x.id).filter(id => id !== fromId)
+    const at = ids.indexOf(toId)
+    ids.splice(at < 0 ? ids.length : at, 0, fromId)
+    setSideOrder(ids)
+  }
+  const sideDragStart = id => ev => { try { ev.dataTransfer.setData('application/x-hermes-filebox-side', id) } catch {} try { ev.dataTransfer.effectAllowed = 'move' } catch {} }
+  const sideDragOver = ev => { try { if (Array.from(ev.dataTransfer?.types || []).includes('application/x-hermes-filebox-side')) ev.preventDefault() } catch {} }
+  const sideDrop = id => ev => { ev.preventDefault(); try { moveSideItem(ev.dataTransfer.getData('application/x-hermes-filebox-side'), id) } catch {} }
+
+  const togglePin = () => {
+    if (!cwd) return
+    const next = pinned ? pinsEffective.filter(p => p !== cwd) : [...pinsEffective, cwd]
+    setPins(next)
+    ctx.storage.set('pins', next)
+  }
+
+  const doMkdir = async () => {
+    const name = mkdirName.trim()
+    if (!name || !cwd) return
+    try {
+      await ctx.rest('/mkdir', { method: 'POST', timeoutMs: 15000, body: { parent: cwd, name } })
+      setMkdirName('')
+      setMkdirMode(false)
+      list.refetch()
+    } catch { /* error surfaces on next list load */ }
+  }
+
+  const doMkfile = async () => {
+    if (!cwd || isTrash) return
+    try {
+      const r = await ctx.rest('/mkfile', { method: 'POST', timeoutMs: 15000, body: { parent: cwd, name: 'New file.txt' } })
+      if (!r?.ok) { hostNotify(ctx, (r && r.error) || 'create failed'); return }
+      list.refetch()
+      setSel([r.path])
+      pendingRename.set(r.path)
+    } catch (e) { hostNotify(ctx, String((e && e.message) || e)) }
+  }
+
+  // Auto-refresh: poll a cheap dir fingerprint; refetch only on change.
+  const watchFp = useRef(null)
+  useEffect(() => {
+    watchFp.current = null
+    if (!cwd || isTrash) return undefined
+    const id = setInterval(async () => {
+      try {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+        const r = await ctx.rest('/watch', { method: 'POST', timeoutMs: 8000, body: { path: cwd } })
+        if (!r?.fingerprint) return
+        if (watchFp.current && watchFp.current !== r.fingerprint) list.refetch()
+        watchFp.current = r.fingerprint
+      } catch { /* offline moment — next tick retries */ }
+    }, 4000)
+    return () => clearInterval(id)
+  }, [cwd, isTrash])
+
+  const startDrag = e => {
+    e.preventDefault()
+    const x0 = e.clientX
+    const w0 = sideWidth
+    const move = ev => setSideWidth(Math.min(320, Math.max(80, Math.round(w0 + ev.clientX - x0))))
+    const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
+
+  const pasteTo = async dest => {
+    if (typeof dest === 'string' && dest.startsWith('trash://')) { hostNotify(ctx, t('restoreFirst')); return }
+    const c = clipboard.get()
+    if (c && c.paths?.length) {
+      try {
+        const r = await runJob(ctx, c.mode === 'cut' ? 'move' : 'copy', { paths: c.paths, dest_dir: dest }, c.mode === 'cut' ? t('jobMove', c.paths.length) : t('jobCopy', c.paths.length))
+        if (!r?.ok) hostNotify(ctx, ((r?.error || r?.failed?.[0]?.error) || 'paste failed'))
+        else if (c.mode === 'cut') clipboard.set(null)
+        list.refetch()
+      } catch (e) { hostNotify(ctx, String((e && e.message) || e)) }
+      return
+    }
+    // No FileBox clipboard — fall back to files copied in Explorer / desktop
+    if (!dest) return
+    try {
+      const r = await ctx.rest('/paste-os', { method: 'POST', timeoutMs: 120000, body: { dest } })
+      if (r?.ok) list.refetch()
+      else hostNotify(ctx, t('nothingToPaste'))
+    } catch (e) { hostNotify(ctx, String((e && e.message) || e)) }
+  }
+
+  const dropMove = async (paths, dest) => {
+    const final = (paths || []).filter(p => typeof p === 'string' && p && p !== dest && parentDir(p) !== dest && !isZipV(p))
+    if (!final.length || !dest) return
+    try {
+      const r = await runJob(ctx, 'move', { paths: final, dest_dir: dest }, t('jobMove', final.length))
+      if (!r?.ok) hostNotify(ctx, ((r?.error || r?.failed?.[0]?.error) || 'move failed'))
+      dirBump.set(dirBump.get() + 1)
+    } catch (e) { hostNotify(ctx, String((e && e.message) || e)) }
+  }
+
+  const isZipV = p => typeof p === 'string' && p.startsWith('zipview://')
+  const isVirt = p => typeof p === 'string' && p.startsWith('trash://')
+  const quickOp = async (kind, target) => {
+    try {
+      if (kind === 'restore') {
+        const paths = (sel.includes(target.path) && sel.length > 1 ? sel : [target.path]).filter(isVirt)
+        if (!paths.length) return
+        const r = await (async () => {
+          const failed = []
+          for (const p of paths) {
+            try {
+              const rr = await ctx.rest('/trash-restore', { method: 'POST', timeoutMs: 60000, body: { id: p } })
+              if (!rr?.ok) failed.push(p)
+            } catch { failed.push(p) }
+          }
+          return { ok: failed.length === 0, failed }
+        })()
+        if (!r.ok) hostNotify(ctx, 'restore failed')
+        clearSel()
+        list.refetch()
+        return
+      }
+      if (isVirt(target.path)) { hostNotify(ctx, t('restoreFirst')); return }
+      if (isZipV(target.path) && kind !== 'open') { hostNotify(ctx, t('zipOpBlocked')); return }
+      // Non-destructive ops act on the whole selection when the target is in it
+      const multi = sel.includes(target.path) && sel.length > 1
+      const paths = multi ? selEntries.map(x => x.path) : [target.path]
+      const label = multi ? `${selEntries.length} items` : target.name
+      if (kind === 'open') { openEntry(target); return }
+      if (kind === 'rename') { pendingRename.set(target.path); setSel([target.path]); return }
+      if (kind === 'delete') { pendingDelete.set(target.path); setSel([target.path]); return }
+      if (kind === 'copy') { clipboard.set({ mode: 'copy', paths, label }); return }
+      if (kind === 'cut') { clipboard.set({ mode: 'cut', paths, label }); return }
+      if (kind === 'copyout') {
+        const ps = (multi ? paths : [target.path]).filter(p => !isVirt(p) && typeof p === 'string')
+        if (!ps.length) return
+        await ctx.rest('/copy-out', { method: 'POST', timeoutMs: 30000, body: { paths: ps } })
+        return
+      }
+      if (kind === 'paste') { await pasteTo(target.is_dir ? target.path : cwd); return }
+      if (kind === 'duplicate') {
+        // Copy each entry into its own parent; backend auto-numbers.
+        const byParent = new Map()
+        for (const p of paths.filter(p => !isVirt(p))) {
+          const parent = parentDir(p)
+          if (!byParent.has(parent)) byParent.set(parent, [])
+          byParent.get(parent).push(p)
+        }
+        for (const [parent, ps] of byParent) await runJob(ctx, 'copy', { paths: ps, dest_dir: parent }, t('jobCopy', ps.length))
+        list.refetch()
+        return
+      }
+      if (kind === 'copypath') { await ctx.os.writeClipboard(multi ? paths.join('\n') : target.path); return }
+      if (kind === 'copyother' || kind === 'moveother') {
+        const dest = otherPaneCwd(tabId, cwd)
+        if (!dest || isTrash) { hostNotify(ctx, t('noOtherPane')); return }
+        const r = await runJob(ctx, kind === 'moveother' ? 'move' : 'copy', { paths, dest_dir: dest }, kind === 'moveother' ? t('jobMove', paths.length) : t('jobCopy', paths.length))
+        if (r && !r.ok) throw new Error(r.error || (r.failed && r.failed[0] && r.failed[0].error) || 'copy failed')
+        list.refetch()
+        return
+      }
+      if (kind === 'reveal') { await ctx.os.revealPath(target.is_dir ? target.path : target.path.replace(/[/\\][^/\\]+$/, '')); return }
+      if (kind === 'compress') {
+        const r = await runJob(ctx, 'zip', { paths }, t('jobZip', paths.length))
+        if (r && !r.ok) throw new Error(r.error || (r.failed && r.failed[0] && r.failed[0].error) || 'compress failed')
+      } else if (kind === 'extract') {
+        const r = await runJob(ctx, 'extract', { path: target.path }, t('jobExtract', target.name))
+        if (r && !r.ok) throw new Error(r.error || 'extract failed')
+      }
+      list.refetch()
+    } catch (e) { hostNotify(ctx, String((e && e.message) || e)) }
+  }
+
+  const startPreviewDrag = e => {
+    e.preventDefault()
+    const grip = e.currentTarget
+    const y0 = e.clientY
+    const h0 = previewH
+    try { grip.setPointerCapture(e.pointerId) } catch {}
+    const move = ev => setPreviewH(Math.min(640, Math.max(140, Math.round(h0 + (y0 - ev.clientY)))))
+    const up = () => {
+      grip.removeEventListener('pointermove', move)
+      grip.removeEventListener('pointerup', up)
+      grip.removeEventListener('pointercancel', up)
+    }
+    grip.addEventListener('pointermove', move)
+    grip.addEventListener('pointerup', up)
+    grip.addEventListener('pointercancel', up)
+  }
+
+  const openEntry = async e => {
+    if (e.path.startsWith('zipview://')) {
+      if (e.is_dir) { setZipView({ zip: zipView.zip, inner: e.member }); clearSel() }
+      else memberOpen(e)
+      return
+    }
+    if (e.is_dir) { nav(e.path); return }
+    const url = `file:///${e.path.replace(/\\/g, '/')}`
+    try {
+      const ok = await ctx.os.openExternal(url)
+      if (!ok) throw new Error('no handler')
+    } catch {
+      try { await ctx.os.revealPath(e.path.replace(/[/\\][^/\\]+$/, '') || e.path) } catch { /* noop */ }
+    }
+  }
+
+  // Shared row gestures for grid tiles AND list rows
+  const rowEvents = (e, idx) => ({
+    onClick: ev => clickSel(e, idx, ev),
+    onContextMenu: () => { if (!sel.includes(e.path)) { anchorRef.current = idx; setSel([e.path]) } },
+    onDragStart: isTrash ? undefined : (ev => {
+      const paths = (sel.includes(e.path) && sel.length) ? sel : [e.path]
+      try { ev.dataTransfer.setData('application/x-hermes-filebox-paths', JSON.stringify(paths)) } catch {}
+      try {
+        if (paths.length === 1) {
+          const one = entries.find(x => x.path === paths[0])
+          if (one && !one.is_dir) ev.dataTransfer.setData('DownloadURL', dlUrl(one.path, one.name))
+        }
+      } catch {}
+      ev.dataTransfer.effectAllowed = 'copyMove'
+      if (!sel.includes(e.path)) { anchorRef.current = idx; setSel([e.path]) }
+    }),
+    onDragOver: (e.is_dir && !isTrash) ? (ev => { if (hasFbPaths(ev)) { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; setDropPath(e.path) } }) : undefined,
+    onDragLeave: (e.is_dir && !isTrash) ? (ev => { if (!ev.currentTarget.contains(ev.relatedTarget)) setDropPath(cur => cur === e.path ? null : cur) }) : undefined,
+    onDrop: (e.is_dir && !isTrash) ? (ev => { ev.preventDefault(); setDropPath(null); try { dropMove(JSON.parse(ev.dataTransfer.getData('application/x-hermes-filebox-paths') || '[]'), e.path) } catch {} }) : undefined,
+    onDoubleClick: isTrash ? undefined : (() => openEntry(e)),
+    onKeyDown: ev => { if (ev.key === 'Enter' && !isTrash) openEntry(e) },
+  })
+  const gridKeys = ev => {
+    const tag = ev.target?.tagName
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+    if (ev.key === 'Escape') { if (zipView) setZipView(null); clearSel(); return }
+    if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'a' || ev.key === 'A')) { ev.preventDefault(); anchorRef.current = null; setSel(entries.map(x => x.path)) }
+    else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(ev.key) && entries.length) {
+      ev.preventDefault()
+      const dir = (ev.key === 'ArrowDown' || ev.key === 'ArrowRight') ? 1 : -1
+      const cur = anchorRef.current ?? entries.findIndex(e => e.path === sel[sel.length - 1])
+      const next = Math.max(0, Math.min(entries.length - 1, (cur < 0 ? (dir > 0 ? -1 : 0) : cur) + dir))
+      if (next >= renderCount && renderCount < entries.length) setRenderCount(Math.min(entries.length, next + 100))
+      if (ev.shiftKey && anchorRef.current != null && entries[anchorRef.current]) {
+        const [a, b] = [anchorRef.current, next].sort((x, y) => x - y)
+        setSel(entries.slice(a, b + 1).map(e => e.path))
+      } else {
+        anchorRef.current = next
+        setSel([entries[next].path])
+      }
+      setTimeout(() => {
+        try {
+          const el = document.querySelector(`[data-fbpath="${CSS.escape(entries[next].path)}"]`)
+          if (el) el.scrollIntoView({ block: 'nearest' })
+        } catch { /* noop */ }
+      }, 60)
+    } else if (ev.key === 'F2' && sel.length === 1) {
+      const hit = shown.find(e => e.path === sel[0])
+      if (hit) quickOp('rename', hit)
+    } else if (ev.key === 'Delete' && sel.length === 1) {
+      const hit = shown.find(e => e.path === sel[0])
+      if (hit) quickOp('delete', hit)
+    } else if (ev.key === 'Enter' && !isTrash && selEntry) {
+      if (ev.altKey) { ev.preventDefault(); setPropPath(selEntry.path) }
+      else openEntry(selEntry)
+    } else if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && !ev.altKey && ['c', 'C', 'x', 'X', 'v', 'V'].includes(ev.key)) {
+      if (ev.key === 'v' || ev.key === 'V') {
+        if (!isTrash && cwd) quickOp('paste', { is_dir: true, path: cwd, name: '' })
+      } else {
+        // Let a real text selection (preview <pre>, rename box) copy normally.
+        try { if (window.getSelection && String(window.getSelection())) return } catch {}
+        if (!sel.length || isTrash || sel.some(isZipV)) return
+        clipboard.set({ mode: ev.key.toLowerCase() === 'x' ? 'cut' : 'copy', paths: [...sel], label: sel.length === 1 ? (selEntries[0]?.name || sel[0]) : `${sel.length} items` })
+      }
+    } else if (ev.altKey && ev.key === 'ArrowUp') {
+      ev.preventDefault()
+      if (!isTrash && list.data?.parent) nav(list.data.parent)
+    }
+  }
+  const menuItems = e => (isVirt(e.path) ? [
+    jsx(ContextMenuItem, { onSelect: () => quickOp('restore', e), children: t('restore') }),
+  ] : [
+    jsx(ContextMenuItem, { onSelect: () => quickOp('open', e), children: t('openFile') }),
+    jsx(ContextMenuItem, { onSelect: () => quickOp('rename', e), children: t('rename') }),
+    jsx(ContextMenuSeparator, {}),
+    jsx(ContextMenuItem, { onSelect: () => quickOp('copy', e), children: t('copy') }),
+    jsx(ContextMenuItem, { onSelect: () => quickOp('cut', e), children: t('cut') }),
+    jsx(ContextMenuItem, { onSelect: () => quickOp('copyout', e), children: t('copyOutside') }),
+    jsx(ContextMenuItem, { onSelect: () => quickOp('paste', e), children: t('paste') }),
+    jsx(ContextMenuItem, { onSelect: () => quickOp('duplicate', e), children: t('duplicate') }),
+    jsx(ContextMenuSeparator, {}),
+    jsx(ContextMenuItem, { onSelect: () => quickOp('compress', e), children: t('compress') }),
+    e.ext === '.zip' && jsx(ContextMenuItem, { onSelect: () => quickOp('extract', e), children: t('extract') }),
+    jsx(ContextMenuItem, { onSelect: () => quickOp('delete', e), variant: 'destructive', children: t('delete') }),
+    jsx(ContextMenuSeparator, {}),
+    jsx(ContextMenuItem, { onSelect: () => quickOp('copypath', e), children: t('copyPath') }),
+    jsx(ContextMenuItem, { onSelect: () => quickOp('reveal', e), children: t('reveal') }),
+    !isZipV(e.path) && jsx(ContextMenuItem, { onSelect: () => setPropPath(e.path), children: t('properties') }),
+    isZipV(e.path) && jsx(ContextMenuItem, { onSelect: () => quickOp('open', e), children: e.is_dir ? t('openFile') : t('openMember') }),
+    !isZipV(e.path) && !e.is_trash && otherPaneCwd(tabId, cwd) && jsx(ContextMenuItem, { onSelect: () => quickOp('copyother', e), children: `${t('copyToOther')} → ${String(otherPaneCwd(tabId, cwd)).split(/[/\\]+/).filter(Boolean).pop()}` }),
+    !isZipV(e.path) && !e.is_trash && otherPaneCwd(tabId, cwd) && jsx(ContextMenuItem, { onSelect: () => quickOp('moveother', e), children: `${t('moveToOther')} → ${String(otherPaneCwd(tabId, cwd)).split(/[/\\]+/).filter(Boolean).pop()}` }),
+    !e.path.startsWith('trash://') && !zipView && e.ext === '.zip' && jsx(ContextMenuItem, { onSelect: () => { setZipView({ zip: e.path, inner: '' }); clearSel() }, children: t('browseZip') }),
+  ])
+
+  if (!cwd && home) setCwd(home)
+  useEffect(() => {
+    paneCwds[tabId] = { cwd, visible: !hidden }
+    if (onCwd && cwd) { try { onCwd(cwd) } catch { /* noop */ } }
+    return () => { try { delete paneCwds[tabId] } catch { /* noop */ } }
+  }, [tabId, cwd, hidden])
+
+  return jsxs('div', { className: 'hermes-fb', style: hidden ? { display: 'none' } : { flex: 1, minHeight: 0, height: 'auto' }, children: [
+    sideCollapsed && jsx('div', { className: 'hermes-fb-rail', children:
+      jsx('button', { className: 'hermes-fb-tbtn', title: 'Show sidebar', onClick: () => setSideCollapsed(false), children: '»' }),
+    }),
+    !sideCollapsed && jsxs('div', { className: 'hermes-fb-nav', style: { width: sideWidth }, children: [
+      jsxs('div', { style: { display: 'flex', alignItems: 'center' }, children: [
+        jsx('div', { className: 'hermes-fb-group', style: { flex: 1 }, children: t('quickAccess') }),
+        jsx('button', { className: 'hermes-fb-tbtn', style: { width: 20, height: 20, fontSize: 11 }, title: 'Hide sidebar', onClick: () => setSideCollapsed(true), children: '«' }),
+      ] }),
+      ...sideItems.map(it => {
+        const label = it.kind === 'pin'
+          ? (it.path.split(/[/\\]+/).filter(Boolean).pop() || it.path)
+          : it.kind === 'trash' ? t('recycleBin') : `${it.drive.device} · ${it.drive.total_gb} GB`
+        const icon = it.kind === 'pin' ? 'folder' : it.kind === 'trash' ? 'trash' : 'device-hard-drive'
+        const btn = jsx('button', {
+          className: 'hermes-fb-navbtn', 'data-on': it.path === cwd,
+          draggable: true, onDragStart: sideDragStart(it.id), onDragOver: sideDragOver, onDrop: sideDrop(it.id),
+          onClick: () => nav(it.path),
+          children: [jsx(Codicon, { name: icon }), jsx('span', { children: label })],
+        }, it.id)
+        return it.kind === 'drive'
+          ? jsxs('div', { onDragOver: sideDragOver, onDrop: sideDrop(it.id), children: [
+              btn,
+              jsx('div', { className: 'hermes-fb-drivebar', children: jsx('div', { style: { width: `${it.drive.percent}%` } }) }),
+            ] }, it.id)
+          : btn
+      }),
+    ] }),
+    !sideCollapsed && jsx('div', { className: 'hermes-fb-grip', onMouseDown: startDrag }),
+    jsxs('div', { className: 'hermes-fb-main', children: [
+      jsxs('div', { className: 'hermes-fb-toolbar', children: [
+        jsx('button', { className: 'hermes-fb-tbtn', disabled: !back.length, 'aria-label': t('back'), title: t('back'), onClick: goBack, children: '←' }),
+        jsx('button', { className: 'hermes-fb-tbtn', disabled: !fwd.length, 'aria-label': t('fwd'), title: t('fwd'), onClick: goFwd, children: '→' }),
+        jsx('button', { className: 'hermes-fb-tbtn', disabled: !list.data?.parent, 'aria-label': t('up'), title: t('up'), onClick: () => { if (zipView) goBack(); else if (list.data?.parent) nav(list.data.parent) }, children: '↑' }),
+        jsx('button', { className: 'hermes-fb-tbtn', 'aria-label': t('refresh'), title: t('refresh'), onClick: () => list.refetch(), children: '↻' }),
+        zipView && jsx('button', { className: 'hermes-fb-tbtn', style: { width: 'auto', fontSize: 11 }, title: t('closeZip'), onClick: () => { setZipView(null); clearSel() }, children: `📦 ${zipBase} ✕` }),
+        jsx('div', { className: 'hermes-fb-crumbs', children:
+          (addrEdit && !isTrash && !zipView)
+            ? jsx('input', { className: 'hermes-fb-addr', value: addrVal, autoFocus: true,
+                onFocus: e => { try { e.target.select() } catch {} },
+                onChange: e => setAddrVal(e.target.value),
+                onKeyDown: e => { if (e.key === 'Enter') goAddr(); else if (e.key === 'Escape') setAddrEdit(false); e.stopPropagation() },
+                onBlur: () => setAddrEdit(false) })
+            : crumbs.map((c, i) => {
+            const upto = crumbs.slice(0, i + 1).join('\\') + (i === 0 && /^[A-Za-z]:\\$/.test(c) ? '' : '')
+            const full = i === 0 ? c : `${crumbs[0]}${crumbs.slice(1, i + 1).join('\\')}`
+            return jsxs('span', { style: { display: 'inline-flex', alignItems: 'center', flexShrink: 0 }, children: [
+              i > 0 && jsx('span', { style: { color: 'var(--ui-text-quaternary)' }, children: '›' }),
+              (isTrash || i === crumbs.length - 1)
+                ? (isTrash || zipView || addrEdit
+                  ? jsx('span', { className: 'hermes-fb-crumb', 'data-on': true, children: c.replace(/\\$/, '') })
+                  : jsx('button', { className: 'hermes-fb-crumb', 'data-on': true, title: t('editPath'), onClick: () => { setAddrVal(cwd); setAddrEdit(true) }, children: c.replace(/\\$/, '') }))
+                : jsx('button', { className: 'hermes-fb-crumb', 'data-on': false, onClick: () => { if (zipView) zipGo(i); else nav(full) }, children: c.replace(/\\$/, '') }),
+            ] }, i)
+          }),
+        }),
+        !isTrash && jsx('button', { className: 'hermes-fb-tbtn', title: pinned ? t('unpinFolder') : t('pinFolder'), onClick: () => togglePin(cwd), children: pinned ? '★' : '☆' }),
+        isTrash && jsx(Button, { size: 'micro', variant: 'ghost', title: t('emptyBinTip'), onClick: doEmptyTrash, children: emptyConfirm ? t('confirmEmpty') : t('emptyBin') }),
+      ] }),
+      jsxs('div', { className: 'hermes-fb-searchrow', children: [
+        jsx('div', { className: 'hermes-fb-search', children: jsx(SearchField, {
+          value: search, onChange: setSearch, placeholder: grepMode ? t('searchContent') : t('searchFiles'),
+          containerClassName: '',
+        }) }),
+        jsx('button', { className: 'hermes-fb-tbtn', style: { width: 'auto', fontSize: 11, color: grepMode ? 'var(--ui-accent)' : undefined }, title: t('searchContent'), onClick: () => setGrepMode(!grepMode), children: grepMode ? '✓ content' : 'content' }),
+        jsx('select', { className: 'hermes-fb-sort', value: sort, 'aria-label': t('sortBy'), onChange: e => setSort(e.target.value), children: [
+          jsx('option', { value: 'name', children: t('sortName') }),
+          jsx('option', { value: 'size', children: t('sortSize') }),
+          jsx('option', { value: 'mtime', children: t('sortDate') }),
+          jsx('option', { value: 'type', children: t('sortType') }),
+        ] }),
+        viewMode === 'grid' && jsx('select', { className: 'hermes-fb-sort', value: tilePx, 'aria-label': 'tile size', onChange: e => setTilePx(Number(e.target.value)), children: [
+          jsx('option', { value: 64, children: 'S' }),
+          jsx('option', { value: 88, children: 'M' }),
+          jsx('option', { value: 112, children: 'L' }),
+          jsx('option', { value: 144, children: 'XL' }),
+        ] }),
+        jsx('button', { className: 'hermes-fb-tbtn', style: { width: 26, height: 22, fontSize: 13 }, title: viewMode === 'grid' ? t('viewList') : t('viewGrid'), onClick: () => setViewMode(viewMode === 'grid' ? 'list' : 'grid'), children: viewMode === 'grid' ? '☰' : '▦' }),
+      ] }),
+      mkdirMode && !isTrash && jsxs('div', { className: 'hermes-fb-mkdir', children: [
+        jsx('input', { value: mkdirName, placeholder: t('newFolder'), onChange: e => setMkdirName(e.target.value), onKeyDown: e => { if (e.key === 'Enter') doMkdir() } }),
+        jsx(Button, { size: 'micro', onClick: doMkdir, children: t('create') }),
+        jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => { setMkdirMode(false); setMkdirName('') }, children: t('cancel') }),
+      ] }),
+      grepShowing ? jsxs('div', { className: 'hermes-fb-list', tabIndex: 0, children: [
+        jsx('div', { className: 'hermes-fb-status', children: [
+          t('grepHits', grep.data.total, new Set(grep.data.hits.map(h => h.path)).size),
+          grep.data.truncated ? ` · ${t('grepMore')}` : null,
+        ].filter(Boolean).join('') }),
+        grep.data.hits.length === 0 && !grep.isFetching && jsx('div', { className: 'hermes-fb-status', children: t('noGrepHits') }),
+        ...grep.data.hits.map(h => jsx('button', {
+          className: 'hermes-fb-lrow', style: { display: 'block', width: '100%', textAlign: 'left', background: 'none', border: 0, cursor: 'pointer' },
+          onClick: () => { nav(parentDir(h.path)); setSel([h.path]) },
+          children: [
+            jsxs('div', { style: { fontSize: 12 }, children: [jsx('b', { children: h.name }), jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: `  ·  L${h.line}` })] }),
+            jsx('div', { style: { fontSize: 11, color: 'var(--ui-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: h.text }),
+          ],
+        }, `${h.path}:${h.line}`)),
+      ] }) : (viewMode === 'list' ? jsxs('div', { className: 'hermes-fb-list', tabIndex: 0, onKeyDown: gridKeys, onScroll: growOnScroll, children: [
+        jsxs('div', { className: 'hermes-fb-lhead', children: [
+          jsx('button', { className: 'hermes-fb-lhbtn', 'data-on': sort === 'name', onClick: () => setSort('name'), children: t('cName') }),
+          jsx('button', { className: 'hermes-fb-lhbtn', 'data-on': sort === 'size', onClick: () => setSort('size'), children: t('cSize') }),
+          jsx('button', { className: 'hermes-fb-lhbtn', 'data-on': sort === 'mtime', onClick: () => setSort('mtime'), children: t('cModified') }),
+          jsx('button', { className: 'hermes-fb-lhbtn', 'data-on': sort === 'type', onClick: () => setSort('type'), children: t('cType') }),
+        ] }),
+        list.isFetching && !list.data && jsx(GlyphSpinner, { ariaLabel: t('explorer') }),
+        list.isError && jsx('div', { className: 'hermes-fb-error', role: 'status', children: t('backendDown') }),
+        ...shown.map((e, idx) => jsx(ContextMenu, { children: [
+          jsx(ContextMenuTrigger, { asChild: true, children: jsxs('div', {
+            className: 'hermes-fb-lrow', 'data-on': sel.includes(e.path), 'data-dir': e.is_dir, 'data-fbpath': e.path,
+            'data-drop': dropPath === e.path, role: 'button', tabIndex: 0,
+            draggable: !isTrash,
+            ...rowEvents(e, idx),
+            'aria-label': e.name,
+            children: [
+              jsxs('span', { className: 'hermes-fb-lname', children: [jsx(Codicon, { name: e.is_dir ? 'folder' : iconFor(category(e)), size: 14 }), jsx('span', { children: e.name })] }),
+              jsx('span', { className: 'hermes-fb-lnum', children: e.is_dir ? '—' : fmtSize(e.size) }),
+              jsx('span', { children: fmtDate(e.mtime) }),
+              jsx('span', { children: e.is_dir ? t('folder') : (e.ext ? e.ext.replace(/^\./, '').toUpperCase() : '—') }),
+            ],
+          }) }),
+          jsx(ContextMenuContent, { children: menuItems(e) }),
+        ] }, e.path)),
+      ] }) : jsxs('div', { className: 'hermes-fb-grid', tabIndex: 0, style: { gridTemplateColumns: `repeat(auto-fill,minmax(${tilePx + 16}px,1fr))` }, onDragOver: ev => { if (hasFbPaths(ev)) ev.preventDefault() }, onKeyDown: gridKeys, onScroll: growOnScroll, onDrop: ev => {
+        if (isTrash) return
+        if (ev.target?.closest && ev.target.closest('[data-dir="true"]')) return
+        ev.preventDefault()
+        try { dropMove(JSON.parse(ev.dataTransfer.getData('application/x-hermes-filebox-paths') || '[]'), cwd) } catch {}
+      }, children: [
+        list.isFetching && !list.data && jsx(GlyphSpinner, { ariaLabel: t('explorer') }),
+        list.isError && jsx('div', { className: 'hermes-fb-error', role: 'status', children: t('backendDown') }),
+        ...shown.map((e, idx) => {
+          const cat = category(e)
+          const iconPx = Math.max(24, Math.round(tilePx * 0.42))
+          return jsx(ContextMenu, { children: [
+          jsx(ContextMenuTrigger, { asChild: true, children: jsx('button', {
+            className: 'hermes-fb-tile', 'data-on': sel.includes(e.path), 'data-dir': e.is_dir, 'data-fbpath': e.path,
+            'data-drop': dropPath === e.path,
+            draggable: !isTrash,
+            ...rowEvents(e, idx),
+            'aria-label': e.name,
+            children: [
+              jsx(Thumb, { ctx, entry: e, px: iconPx, fallback: jsx('span', { className: 'hermes-fb-tileicon', children: jsx(Codicon, { name: iconFor(cat), size: iconPx }) }) }),
+              jsx('span', { className: 'hermes-fb-tilename', children: e.name }),
+              jsx('span', { className: 'hermes-fb-tilesub', children: e.is_dir ? '—' : fmtSize(e.size) }),
+            ],
+          }) }),
+          jsx(ContextMenuContent, { children: menuItems(e) }),
+        ] }, e.path)
+        }),
+      ] })),
+      total > shown.length && jsx('div', { className: 'hermes-fb-status', children: t('showingFirst', shown.length, total) }),
+      grepActive && grep.isFetching && !grepShowing && jsx('div', { className: 'hermes-fb-status', children: t('searchingSub') }),
+      zipView && zipList.isError && jsx('div', { className: 'hermes-fb-error', role: 'status', children: t('backendDown') }),
+      zipView && zipList.isFetching && !zipList.data && jsx(GlyphSpinner, { ariaLabel: zipBase }),
+      job && jobSt?.state === 'running' && jsxs('div', { className: 'hermes-fb-status', children: [
+        jsx('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children:
+          `${job.label} — ${jobSt.total_bytes > 0 ? Math.round(100 * jobSt.done_bytes / jobSt.total_bytes) : (jobSt.total_files ? Math.round(100 * jobSt.done_files / jobSt.total_files) : 0)}%${jobSt.current ? ` · ${jobSt.current}` : ''}` }),
+        jsx('span', { style: { flex: 1 } }),
+        jsx('button', { className: 'hermes-fb-tbtn', style: { width: 'auto', fontSize: 11 }, title: t('cancelJob'), onClick: () => cancelJob(ctx), children: `✕ ${t('cancelJob')}` }),
+      ] }),
+      job && jobSt && jobSt.state !== 'running' && jsxs('div', { className: 'hermes-fb-status', children: [
+        jsx('span', { children: `${job.label}: ${jobSt.state}${jobSt.result?.failed?.length ? ` (${jobSt.result.failed.length} failed)` : ''}${jobSt.result?.error ? ` — ${jobSt.result.error}` : ''}` }),
+        jsx('span', { style: { flex: 1 } }),
+        jsx('button', { className: 'hermes-fb-tbtn', style: { width: 'auto', fontSize: 11 }, onClick: () => { activeJob.set(null); jobStatus.set(null) }, children: '✕' }),
+      ] }),
+      deepActive && deep.isFetching && !deepShowing && jsx('div', { className: 'hermes-fb-status', children: t('searchingSub') }),
+      deepShowing && jsx('div', { className: 'hermes-fb-status', children: [
+        t('searchDeep', deep.data.total ?? entries.length, tabName(cwd)),
+        deep.data.truncated ? ` · ${t('searchMore')}` : null,
+      ].filter(Boolean).join('') }),
+      jsxs('div', { className: 'hermes-fb-status', children: [
+        jsx('span', { children: t('items', total) }),
+        selEntry && jsx('span', { children: `${selEntry.name} · ${selEntry.is_dir ? '' : `${fmtSize(selEntry.size)} · `}${fmtDate(selEntry.mtime)}` }),
+        selEntries.length > 1 && jsx('span', { children: t('selectedN', selEntries.length, fmtSize(selEntries.reduce((a, x) => a + (x.is_dir ? 0 : (x.size || 0)), 0))) }),
+        jsx('span', { style: { flex: 1 } }),
+        !isTrash && jsx('button', { className: 'hermes-fb-tbtn', style: { width: 'auto', fontSize: 11 }, onClick: () => setMkdirMode(!mkdirMode), children: `+ ${t('newFolder')}` }),
+        !isTrash && jsx('button', { className: 'hermes-fb-tbtn', style: { width: 'auto', fontSize: 11 }, onClick: doMkfile, children: `+ ${t('newFile')}` }),
+        jsx('button', { className: 'hermes-fb-tbtn', style: { width: 'auto', fontSize: 11 }, onClick: () => setShowHidden(!showHidden), children: showHidden ? '✓ hidden' : 'hidden' }),
+      ] }),
+      propPath ? jsxs('div', { className: 'hermes-fb-pvwrap', style: { height: previewH }, children: [
+        jsx('div', { className: 'hermes-fb-griph', title: t('dragResize'), onPointerDown: startPreviewDrag }),
+        jsx(PropsPanel, { ctx, t, path: propPath, onClose: () => setPropPath(null) }, propPath),
+      ] }) : selEntry && (isZipV(selEntry.path) ? jsxs('div', { className: 'hermes-fb-pvwrap', style: { height: previewH }, children: [
+        jsx('div', { className: 'hermes-fb-griph', title: t('dragResize'), onPointerDown: startPreviewDrag }),
+        jsxs('div', { className: 'hermes-fb-preview', children: [
+          jsxs('div', { className: 'hermes-fb-opsbar', children: [
+            jsx('span', { style: { fontSize: 12, fontWeight: 600 }, children: selEntry.name }),
+            jsx('span', { style: { flex: 1 } }),
+            jsx('button', { className: 'hermes-fb-tbtn', style: { width: 20, height: 20, fontSize: 12 }, title: t('closePreview'), onClick: () => selectProp(null), children: '×' }),
+          ] }),
+          jsxs('div', { className: 'hermes-fb-kv', children: [jsx('span', { children: t('size') }), jsx('b', { children: selEntry.is_dir ? '—' : fmtSize(selEntry.size) })] }),
+          jsxs('div', { className: 'hermes-fb-actions', children: [
+            !selEntry.is_dir && jsx(Button, { size: 'micro', onClick: () => memberOpen(selEntry), children: t('openMember') }),
+            jsx(Button, { size: 'micro', variant: 'ghost', onClick: extractAllHere, children: t('extractAll') }),
+          ] }),
+        ] }),
+      ] }) : (selEntry.is_dir ? null : jsxs('div', { className: 'hermes-fb-pvwrap', style: { height: previewH }, children: [
+        // A folder selected by a single click draws nothing down here: the click is a selection,
+        // and the panel covering the last rows of the list while you aim at a folder to open it
+        // is the panel getting in the way of the gesture it interrupted. Double click walks in;
+        // the status bar still names the folder, and the context menu still offers Properties.
+        // Files keep the one-click preview, because for a file the click *is* the action.
+        jsx('div', { className: 'hermes-fb-griph', title: t('dragResize'), onPointerDown: startPreviewDrag }),
+        jsx(Preview, { ctx, t, entry: selEntry, refetch: () => list.refetch(), select: selectProp, onExpand: IMG_EXTS.has(selEntry.ext) ? openLb : undefined }, selEntry.path),
+      ] }))),
+      selEntries.length > 1 && jsx(MultiPanel, { ctx, t, entries: selEntries, cwd, clearSel, refresh: () => { list.refetch(); dirBump.set(dirBump.get() + 1) } }),
+    ] }),
+    lbIdx != null && images[lbIdx] && jsx(Lightbox, { ctx, t, images, index: lbIdx, onNav: setLbIdx, onClose: () => setLbIdx(null) }),
+  ] })
+}
+
+function tabName(cwd) {
+  if (!cwd) return 'Home'
+  const parts = String(cwd).split(/[/\\]+/).filter(Boolean)
+  return parts.pop() || cwd
+}
+
+function UpdateChip({ ctx, t }) {
+  const [st, setSt] = useState({ phase: 'idle', local: '', remote: '', msg: '' })
+  const check = async force => {
+    if (st.phase === 'checking' || st.phase === 'updating') return
+    setSt(s => ({ ...s, phase: 'checking' }))
+    try {
+      const r = await ctx.rest('/update-check', { method: 'POST', timeoutMs: 20000, body: { force: !!force } })
+      if (!r?.ok) setSt({ phase: 'error', local: r?.local || '', remote: '', msg: r?.error || 'check failed' })
+      else if (r.behind) setSt({ phase: 'behind', local: r.local, remote: r.remote, msg: '' })
+      else if (r.ahead) setSt({ phase: 'ahead', local: r.local, remote: r.remote, msg: '' })
+      else setSt({ phase: 'current', local: r.local, remote: r.remote, msg: '' })
+    } catch (e) {
+      setSt({ phase: 'error', local: '', remote: '', msg: String((e && e.message) || e).slice(0, 80) })
+    }
+  }
+  const doUpdate = async () => {
+    setSt(s => ({ ...s, phase: 'updating' }))
+    try {
+      const r = await ctx.rest('/update', { method: 'POST', timeoutMs: 180000, body: {} })
+      if (r?.ok) setSt({ phase: 'done', local: r.version || '', remote: '', msg: '' })
+      else setSt({ phase: 'error', local: '', remote: '', msg: String(r?.error || 'update failed').slice(0, 80) })
+    } catch (e) {
+      setSt({ phase: 'error', local: '', remote: '', msg: String((e && e.message) || e).slice(0, 80) })
+    }
+  }
+  useEffect(() => { check(false) }, [])
+  if (st.phase === 'behind') return jsx(Button, { size: 'micro', onClick: doUpdate, title: `v${st.local} installed — click to update`, children: `Update Now → v${st.remote}` })
+  if (st.phase === 'ahead') return jsx(Button, { size: 'micro', variant: 'ghost', title: t('aheadTip', st.local, st.remote), onClick: () => check(true), children: t('aheadV', st.local) })
+  if (st.phase === 'updating') return jsx(Button, { size: 'micro', disabled: true, children: jsxs('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 }, children: [jsx(GlyphSpinner, { ariaLabel: t('checkingUpdate') }), 'Updating…'] }) })
+  if (st.phase === 'done') return jsx(Button, { size: 'micro', variant: 'ghost', title: t('updateDone'), onClick: () => check(true), children: `v${st.local} · reload to apply` })
+  if (st.phase === 'error') return jsx(Button, { size: 'micro', variant: 'ghost', title: `${st.msg} — click to retry`, onClick: () => check(true), children: 'Retry' })
+  if (st.phase === 'current') return jsx(Button, { size: 'micro', variant: 'ghost', title: t('upToDate', st.local), onClick: () => check(true), children: 'Up To Date' })
+  return jsx(Button, { size: 'micro', variant: 'ghost', disabled: true, title: t('checkingUpdate'), children: 'Checking…' })
+}
+
+function Explorer({ ctx }) {
+  const t = usePluginI18n(ID)
+  const roots = useQuery({
+    queryKey: [ID, 'roots'],
+    queryFn: ({ signal }) => ctx.rest('/roots', { method: 'POST', timeoutMs: 15000, signal, body: {} }),
+    staleTime: 600000,
+    retry: false,
+  })
+  const home = roots.data?.home || null
+  const [sort, setSortState] = useState(() => ctx.storage.get('sort', 'name'))
+  const setSort = v => { setSortState(v); try { ctx.storage.set('sort', v) } catch {} }
+  const [tilePx, setTilePxState] = useState(() => Number(ctx.storage.get('tilePx', 88)) || 88)
+  const setTilePx = v => { const n = Number(v) || 88; setTilePxState(n); try { ctx.storage.set('tilePx', n) } catch {} }
+  const [showHidden, setShowHiddenState] = useState(() => ctx.storage.get('showHidden', false) === true)
+  const setShowHidden = v => { setShowHiddenState(v); try { ctx.storage.set('showHidden', v) } catch {} }
+  const [sideWidth, setSideWidthState] = useState(() => Number(ctx.storage.get('sideWidth', 148)) || 148)
+  const setSideWidth = v => { const n = Number(v) || 148; setSideWidthState(n); try { ctx.storage.set('sideWidth', n) } catch {} }
+  const [sideCollapsed, setSideCollapsedState] = useState(() => ctx.storage.get('sideCollapsed', false) === true)
+  const setSideCollapsed = v => { setSideCollapsedState(v); try { ctx.storage.set('sideCollapsed', v) } catch {} }
+  const [sideOrder, setSideOrderState] = useState(() => { try { const o = ctx.storage.get('sideOrder', null); return Array.isArray(o) ? o : null } catch { return null } })
+  const setSideOrder = v => { setSideOrderState(v); try { ctx.storage.set('sideOrder', v) } catch {} }
+  const [previewH, setPreviewHState] = useState(() => Number(ctx.storage.get('previewH', 280)) || 280)
+  const setPreviewH = v => { const n = Number(v) || 280; setPreviewHState(n); try { ctx.storage.set('previewH', n) } catch {} }
+  const [viewMode, setViewModeState] = useState(() => ctx.storage.get('viewMode', 'grid'))
+  const setViewMode = v => { setViewModeState(v); try { ctx.storage.set('viewMode', v) } catch {} }
+  const [tabs, setTabsState] = useState(() => {
+    try {
+      const saved = ctx.storage.get('tabs', null)
+      if (Array.isArray(saved) && saved.length) {
+        const clean = saved
+          .filter(x => x && typeof x === 'object')
+          .map((x, i) => ({ id: Number(x.id) || (Date.now() + i), cwd: typeof x.cwd === 'string' ? x.cwd : null }))
+        if (clean.length) return clean.slice(0, 12)
+      }
+    } catch {}
+    return [{ id: 1, cwd: null }]
+  })
+  const [activeId, setActiveIdState] = useState(() => ctx.storage.get('activeTab', null))
+  const saveTabs = next => { setTabsState(next); try { ctx.storage.set('tabs', next) } catch {} }
+  const setActive = id => { setActiveIdState(id); try { ctx.storage.set('activeTab', id) } catch {} }
+  const active = tabs.find(x => x.id === activeId) || tabs[0]
+  const addTab = () => {
+    const id = Date.now()
+    saveTabs([...tabs, { id, cwd: active?.cwd || home }].slice(-12))
+    setActive(id)
+  }
+  const closeTab = id => {
+    const i = tabs.findIndex(x => x.id === id)
+    if (i < 0) return
+    if (tabs.length <= 1) {
+      const nid = Date.now()
+      saveTabs([{ id: nid, cwd: home }])
+      setActive(nid)
+      return
+    }
+    const next = tabs.filter(x => x.id !== id)
+    saveTabs(next)
+    if (id === active.id) setActive(next[Math.min(i, next.length - 1)].id)
+  }
+  const [dual, setDualState] = useState(() => { try { return ctx.storage.get('dual', false) === true } catch { return false } })
+  const setDual = v => { setDualState(v); try { ctx.storage.set('dual', v) } catch {} }
+  const [dualCwd, setDualCwdState] = useState(() => { try { return ctx.storage.get('dualCwd', null) } catch { return null } })
+  const setDualCwd = c => { setDualCwdState(c); try { ctx.storage.set('dualCwd', c) } catch {} }
+  const paneProps = { ctx, sort, setSort, tilePx, setTilePx, showHidden, setShowHidden, sideWidth, setSideWidth, sideCollapsed, setSideCollapsed, sideOrder, setSideOrder, previewH, setPreviewH, viewMode, setViewMode }
+  return jsxs('div', { className: 'hermes-fb', style: { flexDirection: 'column' }, children: [
+    jsxs('div', { className: 'hermes-fb-tabs', children: [
+      ...tabs.map(x => jsxs('button', {
+        className: 'hermes-fb-tab', 'data-on': x.id === active.id, title: x.cwd || 'Home',
+        onClick: () => setActive(x.id),
+        children: [
+          jsx('span', { children: tabName(x.cwd) }),
+          tabs.length > 1 && jsx('span', { className: 'hermes-fb-tabx', title: 'Close tab', onClick: e => { e.stopPropagation(); closeTab(x.id) }, children: '×' }),
+        ],
+      }, x.id)),
+      jsx('button', { className: 'hermes-fb-tbtn', title: 'New tab', onClick: addTab, children: '+' }),
+      jsx('button', { className: 'hermes-fb-tbtn', title: t('dualPane'), style: dual ? { color: 'var(--ui-accent)' } : undefined, onClick: () => setDual(!dual), children: '◫' }),
+      jsx('span', { style: { flex: 1 } }),
+      jsx(UpdateChip, { ctx, t }),
+      jsx('button', { className: 'hermes-fb-tbtn', title: t('collapse'), onClick: () => { collapsed.set(true); syncPane() }, children: '−' }),
+    ] }),
+    ...(dual ? [jsxs('div', { style: { flex: 1, minHeight: 0, display: 'flex' }, children: [
+      jsx(TabPane, { ...paneProps, tabId: active.id, initialCwd: active.cwd, hidden: false }, active.id),
+      jsx('div', { style: { width: 1, background: 'var(--ui-stroke-secondary)', flexShrink: 0 } }),
+      jsx(TabPane, { ...paneProps, tabId: 'dual', initialCwd: dualCwd || home, hidden: false, onCwd: setDualCwd }, 'dual'),
+    ] })] : tabs.map(x => jsx(TabPane, {
+      ctx, tabId: x.id, initialCwd: x.cwd, sort, setSort, tilePx, setTilePx, showHidden, setShowHidden,
+      sideWidth, setSideWidth, sideCollapsed, setSideCollapsed, sideOrder, setSideOrder,
+      previewH, setPreviewH, viewMode, setViewMode,
+      hidden: x.id !== active.id,
+    }, x.id))),
+  ] })
+}
+
+function FileChip({ ctx }) {
+  const t = usePluginI18n(ID)
+  const isCollapsed = useValue(collapsed)
+  return jsx(Tip, { label: t(isCollapsed ? 'expand' : 'collapse'), children: jsx(Button, {
+    variant: 'ghost', size: 'micro',
+    'aria-label': t(isCollapsed ? 'expand' : 'collapse'),
+    onClick: () => { collapsed.set(!collapsed.get()); syncPane() },
+    children: jsx('span', { style: { fontSize: 11 }, children: 'FileBox' }),
+  }) })
+}
+
+export default {
+  id: ID,
+  name: 'Filebox',
+  description: 'Explorer-style file browser: quick access, breadcrumbs, grid, search, preview.',
+  dispose() {
+    try { if (paneDispose) paneDispose() } catch { /* noop */ }
+    paneDispose = null
+    paneCtx = null
+    paneRegister = null
+  },
+  register(ctx) {
+    ctx.i18n.register(LOCALES)
+    const style = document.createElement('style')
+    style.textContent = CSS
+    document.head.append(style)
+    paneCtx = ctx
+    ctx.onDispose(() => {
+      try { if (paneDispose) paneDispose() } catch { /* noop */ }
+      paneDispose = null
+      style.remove()
+    })
+    paneRegister = () => ctx.register({ id: 'hermes-filebox-pane', area: 'panes', title: 'FileBox', data: { placement: 'right', width: '440px' }, render: () => jsx(Explorer, { ctx }) })
+    if (!collapsed.get()) paneDispose = paneRegister()
+    ctx.register({ id: 'hermes-filebox-chip', area: STATUSBAR_AREAS.right, order: 14, render: () => jsx(FileChip, { ctx }) })
+  },
+}

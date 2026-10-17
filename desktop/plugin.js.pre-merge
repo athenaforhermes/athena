@@ -7074,7 +7074,7 @@ function SendToApp({ ctx }) {
   const s = useSendToApp(ctx)
   const view = acceptsPanel(s.data, { name: s.file })
   if (!s.file) {
-    return jsx('div', { className: 'ah-send idle', children: view.head })
+    return null
   }
   const pace = s.snap && s.snap.state ? jobPace(s.snap) : null
   const done = s.snap && s.snap.state && s.snap.state !== 'running'
