@@ -3993,13 +3993,11 @@ def _install_worker(jid: str, target: str, label: str, ref: Optional[str] = None
         _job_end(jid, "failed", error=msg)
         return {"ok": False}
 
-    # Let the engine choose the script, exactly as it would when opening the app:
-    # the first menu entry the app marks default. On a fresh clone that is its
-    # install script; on an app already built it is the start action.
-    script = rt.open_default(name)
+    # The engine runs the entry the app marks default; many Pinokio apps mark
+    # none, so fall back to the app's own first runnable choice.
+    script = rt.open_default_or_first(name, _app_menu)
     if not script:
-        msg = (f"the app offered no runnable action — its {athena_naming.LAUNCHER} "
-               "has no menu entry marked default")
+        msg = f"the app offered no runnable action — its {athena_naming.LAUNCHER} has no menu entry marked default"
         _job_add(jid, msg)
         _job_end(jid, "failed", error=msg)
         return {"ok": False}

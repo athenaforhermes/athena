@@ -196,6 +196,34 @@ class Runtime:
                     return data["uri"]
         return None
 
+    def open_default_or_first(self, app: str, menu, default: str | None = None,
+                              timeout: float = 15.0) -> str | None:
+        """The entry the app marks default, or its own first runnable choice.
+
+        Most Pinokio apps mark a default; some (FaceFusion, Hunyuan3D) mark none
+        and hide every runnable script inside a submenu. The engine cannot invent
+        one, so ask the app what it offers and take the first entry that names a
+        script — that is the install step on a fresh clone, the start action after.
+        """
+        try:
+            script = self.open_default(app, default, timeout=timeout)
+        except Exception:  # noqa: BLE001 - build the choices even with no engine
+            script = None
+        if script:
+            return script
+        try:
+            m = menu(app) or {}
+        except Exception:  # noqa: BLE001 - a fallback must never raise
+            return None
+        rows = []
+        if isinstance(m, dict):
+            rows = m.get("leaves") or m.get("entries") or m.get("items") or []
+        for row in rows:
+            href = row.get("href") if isinstance(row, dict) else None
+            if isinstance(href, str) and href:
+                return href
+        return None
+
     def status(self, app: str, timeout: float = 10.0) -> bool:
         self._require()
         payload = {"uri": f"~/api/{app}", "id": app, "status": 1}
