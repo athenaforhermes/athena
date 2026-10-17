@@ -32,13 +32,13 @@ In Athena: Store → the app → Install.
 From the agent (Tala), same thing:
 
 ```
-athena_install(url="imzacksong/athena-store#athena-wan2gp")
+athena_install(url="athenaforhermes/athena-store#athena-<app>")
 ```
 
 Anywhere git is available:
 
 ```
-git clone --branch athena-wan2gp https://github.com/imzacksong/athena-store.git wan.git
+git clone --branch athena-<app> https://github.com/athenaforhermes/athena-store.git <app>.git
 ```
 
 The `#branch` form is what carries an app: `owner/repo#branch`. Plain
@@ -46,14 +46,13 @@ The `#branch` form is what carries an app: `owner/repo#branch`. Plain
 
 ## The apps
 
+The catalogue is not open yet: `index.json` carries an empty `apps` list while
+the requirements for listing an app are being worked out. This table fills in as
+apps are published.
+
 | App | Branch | What it does |
 | --- | --- | --- |
-| Wan2GP | `athena-wan2gp` | Video and image generation across Wan, Qwen-Image, LTX and friends |
-| ComfyUI | `athena-comfyui` | Node-graph diffusion workflows, models downloaded on first run |
-| RMBG-2-Studio | `athena-rmbg-2-studio` | Background removal and replacement (BRIA RMBG-2.0) |
-| Hunyuan3D-2-LowVRAM | `athena-hunyuan3d-2-lowvram` | Text/image to 3D meshes on small cards |
-| Maestro | `athena-maestro` | Multi-track local AI studio: video, image, audio |
-| YUE2 // GROOVE | `athena-yue2-groove` | Full songs from style and lyrics |
+| _none yet_ | — | — |
 
 Each branch carries the app's own launcher files plus, where the app has been
 converted, two files Athena writes:

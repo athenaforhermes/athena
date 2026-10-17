@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Athena Store: reading the index, merging it with the global catalogue, and
-installing one of its apps for real.
+"""Athena Store: reading the placeholder index, degrading calmly when it cannot
+be read, and browsing it alongside the global catalogue.
 
 Run with `env -u PYTHONPATH` (the plugin's own venv).
 
-The install checks clone from the real repository over the network with Hermes'
-own GitHub token, because the thing being tested is exactly that a private
-store installed by a logged-in Hermes works — a mocked clone would test nothing
-about the part that can fail.
+The store repository is private and its catalogue is a deliberate placeholder
+with an empty `apps` list, so the two states this file keeps apart are:
+
+* empty but readable — the index was fetched and says there are no apps yet;
+* unreachable — the index could not be read at all (404, no token, offline).
+
+The panel says "coming soon" for the first and "could not be read just now" for
+the second; neither is an error, a traceback, or a spinner that never resolves.
 """
 from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -54,11 +56,17 @@ token = C._gh_token()
 check("a GitHub token is available from the existing login (no second sign-in)",
       bool(token))
 
+check("the shipped default is Athena's own repository, not a person's handle",
+      C.STORE_REPO == "athenaforhermes/athena-store", C.STORE_REPO)
+check("…and the index URL is derived from it",
+      C.STORE_INDEX == "https://raw.githubusercontent.com/athenaforhermes/"
+                       "athena-store/main/index.json", C.STORE_INDEX)
+
 urlmap = C._to_api_url(C.STORE_INDEX)
 check("a raw GitHub URL maps to the contents API for the private route",
       bool(urlmap) and "api.github.com" in urlmap and "index.json" in urlmap, urlmap)
 check("an owner/repo shorthand maps to an index read",
-      "index.json" in (C._to_api_url("imzacksong/athena-store") or ""))
+      "index.json" in (C._to_api_url("athenaforhermes/athena-store") or ""))
 
 # The card's rig mark is only as good as these two maps surviving `_enrich`. The
 # catalogue declares no VRAM and no disk figure — it never has — so "somebody runs
@@ -80,9 +88,12 @@ except C.CatalogError as e:
 check("the store is private: an anonymous read is refused", anon)
 
 data = C.fetch_source(HOME, force=True)
-slugs = [a.get("slug") for a in data.get("apps") or []]
-print(f"       fetched {len(slugs)} apps via {data.get('index')}")
-check("the index reads through GitHub with the token", len(slugs) == 6, str(data.get("error") or slugs))
+apps = data.get("apps") or []
+print(f"       fetched {len(apps)} apps via {data.get('index')}")
+check("the index reads through GitHub with the token", not data.get("error"),
+      str(data.get("error"))[:300])
+check("the catalogue is the published placeholder: no apps in it yet",
+      isinstance(apps, list) and apps == [], str(apps)[:200])
 check("it records which repository it came from",
       str(data.get("repo") or "").endswith("athena-store"), data.get("repo"))
 check("the index is cached on disk next to the catalogue cache",
@@ -90,148 +101,92 @@ check("the index is cached on disk next to the catalogue cache",
 recent = time.time() - json.loads(C._source_path(HOME).read_text())["fetched_at"] < 60
 check("the cached copy is fresh, not a stale leftover", recent)
 
-print("\n== resolving an app to something installable ==")
-r = C.resolve(HOME, "athena-rmbg-2-studio")
-check("a store slug resolves", r.get("git") == C.STORE_URL, str(r)[:200])
-check("…carrying the branch it lives on", r.get("ref") == "athena-rmbg-2-studio", r.get("ref"))
-check("…into the folder the app would occupy from upstream",
-      r.get("folder") == "RMBG-2-Studio.git", r.get("folder"))
-check("…and it says which store answered", r.get("store") == "athena", r.get("store"))
-check("…with the conversion facts along for the ride",
-      r.get("converted") is True and r.get("capabilities") == 5, str(r.get("capabilities")))
+print("\n== an empty catalogue is a state, not a failure ==")
+old_page, old_index, old_get = C._page_cached, C.index, C._get_json
+C._page_cached = lambda *a, **k: (_ for _ in ()).throw(C.CatalogError("offline"))
+C.index = lambda home: {"apps": [], "warming": False}  # type: ignore[assignment]
+b = C.browse(HOME, 0, 60)
+check("browsing an empty published catalogue does not raise", isinstance(b, dict))
+check("…it reports the store as empty", b.get("athena_empty") is True, str(b)[:200])
+check("…with no failure attached to it", b.get("athena_error") == "", b.get("athena_error"))
+check("…and hands back no store apps", b.get("athena_store") == 0, b.get("athena_store"))
 
-t2 = C.resolve(HOME, "wan2gp")
-check("a title resolves case-insensitively too",
-      t2.get("git") == C.STORE_URL and t2.get("ref") == "athena-wan2gp", str(t2)[:160])
+print("\n== an unreachable index is reported as unreachable, not as empty ==")
+C._get_json = lambda *a, **k: (_ for _ in ()).throw(C.CatalogError("404 Not Found"))
+raw = C.fetch_source(HOME / "unreachable", force=True)
+check("fetch_source returns an empty list and the reason instead of raising",
+      raw.get("apps") == [] and "404" in str(raw.get("error") or ""), str(raw)[:200])
+check("…and the reason is kept for the panel",
+      "404" in str(C._SOURCE_STATUS.get("error") or ""), C._SOURCE_STATUS.get("error"))
+u = C.browse(HOME / "unreachable", 0, 60)
+check("browse does not raise when the index cannot be read", isinstance(u, dict))
+check("…and says the store is empty", u.get("athena_empty") is True, str(u)[:200])
+check("…while carrying the reason, so it is not mistaken for a published empty store",
+      "404" in str(u.get("athena_error") or ""), u.get("athena_error"))
+check("…and hands back no apps at all", u.get("apps") == [] and u.get("athena_store") == 0,
+      str(u.get("apps"))[:120])
 
-b = C.resolve(HOME, "imzacksong/athena-store#athena-comfyui")
-check("owner/repo#branch resolves to that branch",
-      b.get("git") == C.STORE_URL and b.get("ref") == "athena-comfyui", str(b)[:160])
-b2 = C.resolve(HOME, "https://github.com/imzacksong/athena-store/tree/athena-wan2gp")
-check("a pasted …/tree/<branch> URL means the same thing",
-      b2.get("ref") == "athena-wan2gp", str(b2)[:160])
+# The panel's sentence and the fields it is conditioned on. This is a build
+# artefact check on purpose: the empty state ships, so it is asserted in the
+# shipped copy rather than in a component the suite cannot mount.
+ui = (PLUG / "desktop" / "plugin.js").read_text(encoding="utf-8")
+check("the panel has a calm 'coming soon' empty state for an empty catalogue",
+      "catalogue is coming soon" in ui)
+check("…driven by athena_empty / athena_error rather than by an error banner",
+      "athenaSoon" in ui and "athena_empty" in ui and "athena_error" in ui)
+check("…and it is not shown while a search is running",
+      "athenaSoon && !active" in ui)
 
+C._get_json, C._page_cached, C.index = old_get, old_page, old_index
+
+print("\n== resolving an app without a catalogue ==")
+r = C.resolve(HOME, "athena-does-not-exist")
+check("an unknown store slug answers an error object, not an exception",
+      isinstance(r, dict) and not r.get("git") and r.get("error"), str(r)[:200])
 plain = C.resolve(HOME, "https://github.com/someone/thing.git")
 check("a plain repository URL is still itself",
       plain.get("git") == "https://github.com/someone/thing.git", str(plain)[:120])
 
-d = C.detail(HOME, "athena-yue2-groove")
-check("detail answers for our own apps without the global store",
-      d.get("store") == "athena" and d.get("title"), str(d)[:160])
-
 print("\n== browsed together with the global catalogue ==")
-fake_page = {
-    "items": [{"app": {"slug": f"global-{i}", "title": f"Global {i}"}} for i in range(60)],
-    "page": 1, "perPage": 60, "total": 600, "totalPages": 10,
-}
 calls: list[tuple] = []
 
 
 def fake_page_cached(page, per_page, q, tag, sort):
-    calls.append((page, per_page, skip_hint))
+    calls.append((page, per_page, per_page))
     rows = [{"slug": f"global-{page}-{i}", "title": f"Global {page}-{i}", "tags": []}
             for i in range(per_page)]
     return {"items": [{"app": r} for r in rows], "page": page, "perPage": per_page,
             "total": 600, "totalPages": 10}
 
 
-skip_hint = None
 C._page_cached = fake_page_cached  # type: ignore[assignment]
 C.index = lambda home: {"apps": []}  # type: ignore[assignment]
 
 p0 = C.browse(HOME, offset=0, limit=60)
-mine_first = [a for a in p0["apps"][:6] if a.get("store") == "athena"]
-check("page one puts the store's own apps first", len(mine_first) == 6, str(len(mine_first)))
-check("…and fills the rest of the page from the global catalogue",
-      len(p0["apps"]) == 60 and p0["apps"][6]["store"] == "global", str(len(p0["apps"])))
-check("…counting both catalogues in the total",
-      p0["total"] == 606 and p0["athena_store"] == 6, f"{p0['total']} / {p0['athena_store']}")
-check("…and naming both in the source", p0["source"] == "athena+store", p0["source"])
+check("a page is filled from the global catalogue when the store is empty",
+      len(p0["apps"]) == 60 and p0["apps"][0]["store"] == "global", str(len(p0["apps"])))
+check("…counting only the global catalogue in the total",
+      p0["total"] == 600 and p0["athena_store"] == 0, f"{p0['total']} / {p0['athena_store']}")
+check("…and naming it as the only source", p0["source"] == "store", p0["source"])
 
 calls.clear()
 p1 = C.browse(HOME, offset=60, limit=60)
-# The global catalogue is still paged in windows of 60, but our apps now occupy
-# the head of the first window, so page two of the store is slot 54 of global
-# page one — the window moves, the catalogue's own paging does not.
-check("the next page is global-only, from the right global window and slot",
-      p1["apps"][0]["slug"] == "global-1-54" and calls and calls[0][0] == 1,
+check("the next page is the global catalogue's own second page",
+      p1["apps"][0]["slug"] == "global-2-0" and calls and calls[0][0] == 2,
       f"{p1['apps'][0]['slug']} / calls={calls}")
 
+# Store apps still lead the page when there are any: that ordering is what the
+# Store tab depends on, and it is exercised here with a stub because nothing is
+# published yet.
+C.store_apps = lambda *a, **k: [{"slug": "athena-stub", "title": "Stub",
+                                 "repoUrl": "https://github.com/x/stub", "ref": "athena-stub"}]
 calls.clear()
-p2 = C.browse(HOME, offset=6, limit=60)
-check("once past our own apps the global catalogue starts from its beginning",
-      calls and calls[0][0] == 1 and calls[0][1] == 60, str(calls))
-
-q = C.browse(HOME, offset=0, limit=60, q="background")
-check("search reaches our store's apps too",
-      any("rmbg" in (a.get("slug") or "") for a in q["apps"]),
-      str([a.get("slug") for a in q["apps"]][:3]))
-
-print("\n== installing an app from the store, for real ==")
-dest_home = HOME / "home"
-
-
-def wipe(p: Path) -> None:
-    """Remove a previous test install, including git's read-only objects.
-
-    Windows leaves git object files read-only, so a plain rmtree fails on them
-    and the next run measures the last run's leftovers.
-    """
-    for _ in range(3):
-        shutil.rmtree(p, ignore_errors=True)
-        if not p.exists():
-            return
-        subprocess.run(["cmd", "/c", "rmdir", "/S", "/Q", str(p)],
-                       capture_output=True, text=True)
-
-
-wipe(dest_home)
-(dest_home / "api").mkdir(parents=True, exist_ok=True)
-
-import plugin_api as A  # noqa: E402
-
-
-plan = C.resolve(HOME, "athena-rmbg-2-studio")
-t0 = time.time()
-got = A.clone_app(plan["git"], dest_home, ref=plan["ref"], name=plan["folder"])
-dt = time.time() - t0
-print(f"       cloned {plan['git']}#{plan['ref']} -> api/{plan['folder']} in {dt:.1f}s")
-check("the clone succeeded", bool(got.get("ok")), str(got)[:400])
-
-app = dest_home / "api" / "RMBG-2-Studio.git"
-check("the app landed in the folder the engine would have used",
-      (app / "pinokio.js").is_file(), str(app))
-check("it is a real checkout, so the app's own tooling works",
-      (app / ".git").is_dir())
-check("…on the app's branch of the store",
-      subprocess.run(["git", "-C", str(app), "rev-parse", "--abbrev-ref", "HEAD"],
-                     capture_output=True, text=True).stdout.strip() == plan["ref"])
-files = sorted(p.name for p in app.iterdir() if p.is_file())
-check("…carrying the launcher and the conversion output",
-      all(f in files for f in ("pinokio.js", "install.js", "start.js", "GUIDE.md", "agent.json")),
-      str(files))
-# `app/` is the app's own source (two tracked files here), not build output —
-# what must not travel is what the publishing machine produced: the venv it
-# built, the caches it filled, the logs it wrote, the outputs it made.
-built = [d for d in ("venv", "logs", "cache", "output_images") if (app / d).exists()]
-inside = sorted(str(p.relative_to(app)).replace("\\", "/")
-                for p in (app / "app").rglob("*") if p.is_file())
-check("…and none of the publishing machine's own build came with it",
-      not built and inside == ["app/app.py", "app/requirements.txt"],
-      f"built={built} inside={inside}")
-
-pull = subprocess.run(["git", "-C", str(app), "pull"], capture_output=True, text=True)
-check("the app's own `git pull` works — its Update button is alive",
-      pull.returncode == 0 and "up to date" in (pull.stdout + pull.stderr).lower(),
-      (pull.stdout + pull.stderr).strip()[:200])
-
-hist = subprocess.run(["git", "-C", str(app), "log", "--oneline", "-1"],
-                      capture_output=True, text=True).stdout.strip()
-check("…with real history behind it, not an empty repository", bool(hist), hist)
-
-again = A.clone_app(plan["git"], dest_home, ref=plan["ref"], name=plan["folder"])
-check("installing the same app twice reuses it instead of making a second copy",
-      again.get("already") is True, str(again)[:200])
+p2 = C.browse(HOME, offset=0, limit=60)
+check("a store app still leads the page and counts in the total",
+      p2["apps"][0]["slug"] == "athena-stub" and p2["athena_store"] == 1
+      and p2["total"] == 601, f"{p2['apps'][0]['slug']} / {p2['total']}")
+check("…and the global page below it is still full width",
+      len(p2["apps"]) == 60 and p2["apps"][1]["store"] == "global", str(len(p2["apps"])))
 
 print("\n== the store source is a setting ==")
 other = HOME / "home2"
@@ -243,10 +198,11 @@ check("clearing it falls back to Athena's own store", C.source_url(other) == C.d
 check("a home with no setting at all still reads Athena's store",
       C.source_url(Path(tempfile.gettempdir()) / "definitely-not-here") == C.default_source())
 
+import plugin_api as A  # noqa: E402
+
 A._apply_store_source({"home": str(other), "store_index": "https://example.com/s/index.json"})
 check("the settings layer publishes the source where the catalogue reads it",
       C.source_url(other) == "https://example.com/s/index.json")
-
 
 print("\n== the apps tab's layout is a setting, and only two things it can be ==")
 check("rows is rows, however it was spelled",

@@ -34,7 +34,7 @@ UA = "Athena/1.0 (+local Hermes app store)"
 # Reading it is the same idea as reading the global catalogue — one small index
 # instead of 64 pages — so it is fetched whole and filtered here, where the
 # global store filters on its own server.
-STORE_REPO = "imzacksong/athena-store"
+STORE_REPO = "athenaforhermes/athena-store"
 STORE_URL = f"https://github.com/{STORE_REPO}"
 STORE_BRANCH = "main"
 STORE_INDEX = f"https://raw.githubusercontent.com/{STORE_REPO}/{STORE_BRANCH}/index.json"
@@ -217,6 +217,15 @@ def warm(home: Path, force: bool = False) -> bool:
 
 _SOURCE_MEMO: Dict[str, Any] = {"key": None, "data": None}
 
+# Why the last read of Athena's own index failed, if it did. The store index is
+# a placeholder today: the repository exists but its catalogue is empty, so the
+# interesting distinction is between "read it, there is nothing in it yet" and
+# "could not read it at all". fetch_source already tells the two apart in its
+# return value; this remembers which one happened so browse() can pass it on to
+# the panel without fetching the index a second time (a stubbed store_apps in
+# the paging tests must not turn into a network read).
+_SOURCE_STATUS: Dict[str, Any] = {"error": ""}
+
 
 def _source_path(home: Path) -> Path:
     return _cache_dir(home) / "store.json"
@@ -369,16 +378,22 @@ def fetch_source(home: Path, force: bool = False) -> Dict[str, Any]:
     if cached and cached.get("index") == url and not force:
         age = time.time() - float(cached.get("fetched_at") or 0)
         if age < STORE_TTL:
+            _SOURCE_STATUS["error"] = ""
             return cached
 
     try:
         payload = _get_json(url, token=_gh_token())
     except CatalogError as e:
+        # Remembered for browse(): the panel says "coming soon" for an
+        # unpublished catalogue and must not claim a failure it can explain.
+        _SOURCE_STATUS["error"] = str(e)
         if cached:
             out = dict(cached)
             out["stale"] = str(e)
             return out
         return {"apps": [], "index": url, "error": str(e)}
+
+    _SOURCE_STATUS["error"] = ""
 
     apps = payload.get("apps") if isinstance(payload, dict) else None
     if not isinstance(apps, list):
@@ -725,6 +740,10 @@ def browse(home: Path, offset: int = 0, limit: int = 60, q: str = "",
     # they take part of every page, so the global page to read moves up by
     # however many of ours the caller has not passed yet.
     mine = store_apps(home, q, tag, sort)
+    # Empty is the normal state of the published catalogue today, so it is a
+    # fact to report, not a failure: no apps plus no recorded error is "nothing
+    # published yet", and the panel says so rather than showing a blank shelf.
+    athena_error = "" if mine else str(_SOURCE_STATUS.get("error") or "")
     window: List[Dict[str, Any]] = []
     if offset < len(mine):
         window = [_enrich(a, home) for a in mine[offset: offset + per_page]]
@@ -775,6 +794,8 @@ def browse(home: Path, offset: int = 0, limit: int = 60, q: str = "",
             "total_pages": payload.get("totalPages"),
             "tag": tag, "sort": sort, "q": q,
             "athena_store": len(mine),
+            "athena_empty": not mine,
+            "athena_error": athena_error,
             "source": "athena+store" if mine else "store",
             "warming": False,
         }
@@ -787,6 +808,8 @@ def browse(home: Path, offset: int = 0, limit: int = 60, q: str = "",
         rest["count"] = len(rest["apps"])
         rest["total"] = max(0, (rest.get("total") or 0) - dropped) + len(mine)
         rest["athena_store"] = len(mine)
+        rest["athena_empty"] = not mine
+        rest["athena_error"] = athena_error
         if window or mine:
             rest["source"] = "athena+cache"
         return rest

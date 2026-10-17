@@ -2608,6 +2608,11 @@ function StoreTab({ ctx, st, refresh }) {
   const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
+  // Athena's own catalogue is published but empty while its requirements are
+  // being worked out. That is not a failure to report in red: the panel says
+  // it is coming soon, and the public catalogue underneath still browses.
+  const [athenaSoon, setAthenaSoon] = useState(false)
+  const [athenaWhy, setAthenaWhy] = useState('')
   const [repoUrl, setRepoUrl] = useState('')
   const [repoMsg, setRepoMsg] = useState('')
   const [showRepo, setShowRepo] = useState(false)
@@ -2644,6 +2649,10 @@ function StoreTab({ ctx, st, refresh }) {
       const list = r.apps || []
       setApps((prev) => (append ? [...prev, ...list] : list))
       if (typeof r.total === 'number') setTotal(r.total)
+      // Athena's own catalogue: empty is a published state, not an error. The
+      // backend reports the two separately (`athena_empty` vs `athena_error`).
+      setAthenaSoon(r.athena_empty === true)
+      setAthenaWhy(r.athena_error || '')
       setOffset(off + list.length)
       // The store is the live source; the cached crawl only steps in when it
       // cannot be reached, and saying so beats silently showing stale results.
@@ -2872,6 +2881,18 @@ function StoreTab({ ctx, st, refresh }) {
       : null,
 
     err ? jsx('div', { className: 'ah-warn', style: { marginBottom: 8 }, children: err }) : null,
+
+    // Athena's own catalogue is a placeholder for launch: the repository exists
+    // and its index is empty. Saying that once, calmly, is the whole empty state
+    // — no red banner, no spinner, no traceback. `athena_error` is kept apart
+    // from `athena_empty` so the sentence can be true about which happened.
+    (athenaSoon && !active)
+      ? jsx('div', { className: 'ah-empty', style: { marginBottom: 10 }, children:
+          'Athena’s own catalogue is coming soon — '
+          + (athenaWhy
+              ? 'it could not be read just now, which is expected while it is being prepared.'
+              : 'nothing has been published into it yet.') })
+      : null,
 
     // Grid renders what the filter left. When nothing is left, the reason is the
     // store's own pace of publishing, not an error, so it says which it is.
