@@ -1,0 +1,6 @@
+{
+  "title": "Mochi video model",
+  "description": "Local AI model runner: AI bundle, venv, weight download, gradio UI.",
+  "icon": "icon.png",
+  "version": "2.0"
+}

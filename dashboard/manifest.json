@@ -1,0 +1,7 @@
+{
+  "api": "plugin_api.py",
+  "name": "athena",
+  "label": "Athena",
+  "description": "Local AI app store: install/run AI apps natively in Hermes, expose them to agents as tools.",
+  "version": "0.1.0"
+}

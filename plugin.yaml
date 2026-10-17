@@ -1,0 +1,55 @@
+name: athena
+version: 1.0.1
+description: "The local AI app store for Hermes. Browse a constantly growing catalogue of apps (image/video/audio/LLM/agent projects) and install, run and stop them natively inside Hermes Desktop, or build your own from any git repository. Every app reuses the credentials Hermes already holds — no second sign-in."
+author: "Tala + Zack"
+# The Hermes this plugin was built against. Declared so a version mismatch is a
+# sentence rather than a mystery: the tool surface is registered dynamically, and
+# an older Hermes would load the plugin and then register half of it.
+# Bounded on both sides: `hermes plugins doctor` warns without an upper bound, and the
+# warning is the useful kind — an unbounded major version is how a working plugin
+# stops importing six months later. 0.21.0 and 0.22.2 are the Hermes versions this was
+# built and run against, and `tests/live/t_release.py` fails the suite the day a Hermes
+# outside the window is the one running here: that failure is the moment to test the new
+# one, or widen the claim in this line and in `docs/catalog-entry.yaml` together.
+requires_hermes: ">=0.21.0,<0.23.0"
+# The app file browser and the system monitor. Declared so a fresh install
+# provisions them; without an explicit list the plugin loads and its previews
+# and stats silently 500. Every requirement is bounded — `t_release.py` fails on an
+# open-ended one, because a dependency that is allowed to become anything is a
+# dependency that eventually becomes something this plugin does not run on.
+#
+# `psutil` is marker-scoped to match Hermes core, which pins it twice: ==7.2.2 on every
+# platform except Android, and a git URL on Android (py>=3.14). An unmarked requirement
+# lands in the Android split too, where a URL source cannot satisfy a version range —
+# admission then rejects the whole resolution and disables the plugin. Android gets
+# psutil from core anyway, so the requirement is simply not needed there.
+python_dependencies: ["send2trash>=1.8,<2", "psutil>=5.9,<9; sys_platform != 'android'", "Pillow>=9,<14", "numpy>=1.24,<3"]
+# Every tool this plugin registers, in the order it registers them. An
+# incomplete list is not fatal — the tools still work — but it is the only place
+# a reader can see the whole surface, and `hermes plugins doctor` flags the
+# shortfall, which is noise that hides a real warning the day there is one.
+provides_tools:
+  - athena_status
+  - athena_apps
+  - athena_search
+  - athena_install
+  - athena_launch
+  - athena_stop
+  - athena_logs
+  - athena_store_detail
+  - athena_publish
+  - athena_delete
+  - athena_fix
+  - athena_report
+  - athena_app_health
+  - athena_models
+  - athena_settings
+  - athena_files
+  - athena_space
+  - athena_job
+  - athena_capabilities
+  - athena_generate
+  - athena_runs
+  - athena_schedule
+  - athena_build_app
+  - athena_machines

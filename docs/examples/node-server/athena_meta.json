@@ -1,0 +1,6 @@
+{
+  "title": "SillyTavern",
+  "description": "Node server launcher: npm install, free port resolved in code, URL captured from the log.",
+  "icon": "icon.png",
+  "version": "2.0"
+}

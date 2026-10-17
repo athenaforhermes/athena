@@ -1,0 +1,6 @@
+{
+  "title": "http-server launcher",
+  "description": "Menu-only launcher for a CLI tool \u2014 no web UI, no install step.",
+  "icon": "icon.png",
+  "version": "2.0"
+}

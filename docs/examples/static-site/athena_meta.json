@@ -1,0 +1,6 @@
+{
+  "title": "Static example",
+  "description": "A serverless app: index.html at the launcher root, no scripts needed.",
+  "icon": "icon.png",
+  "version": "2.0"
+}

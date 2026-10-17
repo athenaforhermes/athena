@@ -1,0 +1,6 @@
+{
+  "title": "Stable Diffusion 3.5",
+  "description": "Gradio web UI for Stable Diffusion 3.5 \u2014 the canonical Python server launcher.",
+  "icon": "icon.png",
+  "version": "2.0"
+}

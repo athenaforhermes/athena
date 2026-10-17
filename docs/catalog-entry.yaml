@@ -1,0 +1,66 @@
+# Catalog entry for Athena. Copy this to `plugin-catalog/athena.yaml` in the Hermes repo and
+# open the PR. Three fields cannot be written until the plugin has a public home — `repo`,
+# `sha` and `maintainer` — and the CI gate fails on the zero sha by design: it clones the
+# pinned commit and runs `hermes plugins validate` there, so the pin has to be a real commit
+# in the real repo. Everything else below is final and already passes the structural gate
+# (`scripts/validate_plugin_catalog.py`).
+#
+# Keep the pin QUOTED even after it is real: the validator reads YAML 1.1, where an unquoted
+# all-digit sha is an integer — a sha that happens to contain no a-f is a valid commit and an
+# invalid entry unless it is a string.
+name: athena
+repo: https://github.com/athenaforhermes/athena
+sha: "0000000000000000000000000000000000000000"
+title: Athena
+description: >-
+  The local AI-app store for Hermes: browse a constantly growing catalogue of apps,
+  install an app from any git repository, launch it, read its logs and stop it. It
+  needs no API key and no account of its own, because it reuses the credentials
+  Hermes already holds. Apps run on your machine on loopback; the panel and the CLI
+  are two doors into the same engine. Agent control is in active development.
+maintainer: athenaforhermes
+tier: community
+category: platform
+version: "1.0.1"
+requires_hermes: ">=0.21.0,<0.23.0"
+docs_url: https://github.com/athenaforhermes/athena
+# `readme: true` makes the docs site render the plugin's own README from the
+# pinned commit — which is where the licence, the screenshots and the full
+# architecture live. It needs `repo` to be github.com (or gitlab.com), which it is.
+readme: true
+# `screenshots:` is deliberately absent until the repo exists: the validator only
+# accepts https URLs on github.com / raw.githubusercontent.com, so a placeholder
+# here would be an un-fetchable entry the moment it shipped. Three are intended —
+# a real panel, a running app, and a machine's screen — all cut from the pinned
+# commit once it is real. The licence is the repo's `LICENSE` (MIT), landed there
+# with the README.
+platforms: [windows, linux]
+capabilities:
+  provides_tools:
+    - athena_status
+    - athena_apps
+    - athena_search
+    - athena_install
+    - athena_launch
+    - athena_stop
+    - athena_logs
+    - athena_store_detail
+    - athena_publish
+    - athena_delete
+    - athena_fix
+    - athena_report
+    - athena_app_health
+    - athena_models
+    - athena_settings
+    - athena_files
+    - athena_space
+    - athena_job
+    - athena_capabilities
+    - athena_generate
+    - athena_runs
+    - athena_schedule
+    - athena_build_app
+    - athena_machines
+  provides_hooks: []
+  provides_middleware: []
+  requires_env: []

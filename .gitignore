@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.log
+runs/
+api/
+engine/node_modules/
+cache/
+outputs/
+settings.json
