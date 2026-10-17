@@ -10,7 +10,7 @@
 # invalid entry unless it is a string.
 name: athena
 repo: https://github.com/athenaforhermes/athena
-sha: "0000000000000000000000000000000000000000"
+sha: "cea9d059f059dc2fb79c29af7cf9610fc4c9ea9e"
 title: Athena
 description: >-
   The local AI-app store for Hermes: browse a constantly growing catalogue of apps,
