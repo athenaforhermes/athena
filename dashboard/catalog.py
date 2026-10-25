@@ -9,6 +9,11 @@ The whole store is ~6,400 apps across 64 pages and takes about 40 seconds to
 walk, so it is cached on disk and refreshed in the background. Callers never
 wait on a cold cache: they get whatever is on disk (or a first page) plus a
 ``warming`` flag, and the next call has the rest.
+
+Athena also has a store of its own — a repository of apps, one branch each — and
+it is **opt-in**: nothing is fetched from one until the person names a repository
+they own (Settings → "Store index"), and with none named the store tab shows its
+quiet "coming soon" state. See ``default_source``.
 """
 
 from __future__ import annotations
@@ -28,16 +33,24 @@ API = "https://api.pinokio.co/apps"      # the global catalogue, as JSON
 STORE_ORIGIN = "https://pinokio.co"       # the shopfront, for its tag cloud
 UA = "Athena/1.0 (+local Hermes app store)"
 
-# Athena's own store. The global catalogue is a JSON API listing other people's
-# repositories; this one is a repository *of apps*: `main` holds an index, every
-# other branch holds one app, and an app is installed by cloning its branch.
-# Reading it is the same idea as reading the global catalogue — one small index
-# instead of 64 pages — so it is fetched whole and filtered here, where the
-# global store filters on its own server.
-STORE_REPO = "athenaforhermes/athena-store"
-STORE_URL = f"https://github.com/{STORE_REPO}"
+# A store, if the person names one. A store is a repository *of apps*: `main`
+# holds an index, every other branch holds one app, and an app is installed by
+# cloning its branch. Reading it is the same idea as reading the global
+# catalogue — one small index instead of 64 pages — so it is fetched whole and
+# filtered here, where the global store filters on its own server.
+#
+# **There is no default store, and there must never be one again.** A store the
+# product picked for you is a store whose contents you never agreed to run: that
+# is why `athenaforhermes/athena-store` is gone from this module. Athena fetches
+# nothing until the person names a repository they own (Settings → "Store
+# index"); with no name set, `source_url` is empty, `fetch_source` reads nothing,
+# and the panel shows its quiet "coming soon" state. The three constants below
+# are the shape of the *configured* store, not a product default — `STORE_URL`
+# and `STORE_INDEX` are empty strings for exactly that reason.
+STORE_REPO: Optional[str] = None   # never a default: a named store fills this in
+STORE_URL = ""                     # the configured store's git URL, "" when none
 STORE_BRANCH = "main"
-STORE_INDEX = f"https://raw.githubusercontent.com/{STORE_REPO}/{STORE_BRANCH}/index.json"
+STORE_INDEX = ""                   # no index URL until one is named
 STORE_TTL = 3600           # an index of installed apps changes when a human changes it
 
 INDEX_TTL = 24 * 3600      # a full crawl is ~40s; daily is plenty
@@ -232,7 +245,15 @@ def _source_path(home: Path) -> Path:
 
 
 def default_source() -> str:
-    return STORE_INDEX
+    """The default store source: none.
+
+    Empty by design and by rule — see the constants at the top. A store is used
+    only after the person names a repository they own (`set_source`), and the
+    panel's "coming soon" state is what "no store named" is supposed to look
+    like. Anything non-empty here would be the product choosing a store for the
+    user, which is the thing this function exists to prevent.
+    """
+    return ""
 
 
 def source_setting_path(home: Path) -> Path:
@@ -248,8 +269,14 @@ def source_setting_path(home: Path) -> Path:
 
 
 def set_source(home: Path, index_url: Optional[str]) -> None:
+    """Record which store index to read.
+
+    This is the whole opt-in: nothing but a name written here makes Athena read a
+    store. An empty value means "no store", the same as never having set one — it
+    is not "fall back to the product's store", because there is no such store.
+    """
     path = source_setting_path(home)
-    payload = {"index": (index_url or "").strip() or default_source()}
+    payload = {"index": (index_url or "").strip()}
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(payload, fh)
@@ -258,6 +285,7 @@ def set_source(home: Path, index_url: Optional[str]) -> None:
 
 
 def source_url(home: Path) -> str:
+    """The index URL of the store the person named, or "" when there is none."""
     try:
         raw = json.loads(source_setting_path(home).read_text(encoding="utf-8"))
         return (raw.get("index") or "").strip() or default_source()
@@ -268,25 +296,53 @@ def source_url(home: Path) -> str:
 _GH_TOKEN: Dict[str, Any] = {"token": None, "at": 0.0}
 
 
-def _gh_token() -> str:
-    """The GitHub token Hermes already holds, so a private store just works.
+def _hermes_secret(name: str) -> Optional[str]:
+    """Read a declared credential through Hermes' secret route, or None.
 
-    Athena reuses Hermes' login instead of asking for a second one; the token is
-    read from the CLI that already owns it and cached briefly, because this runs
-    on the browse path.
+    `agent.secret_scope.get_secret` honours the active profile's secret scope and
+    fails closed (`UnscopedSecretError`) when the process is multiplexing with no
+    scope installed. Fail-closed is the right answer here and not an error: a
+    store with no token is still readable when it is public, and a private one
+    reports its own failure. `agent` is absent when this module is loaded outside
+    the Hermes process (the store tests run it under the plugin's own venv),
+    which is the same answer. The value is never logged.
+    """
+    try:
+        from agent.secret_scope import get_secret  # type: ignore
+    except Exception:  # noqa: BLE001 - not running inside Hermes
+        return None
+    try:
+        val = get_secret(name)
+    except Exception:  # noqa: BLE001 - incl. UnscopedSecretError: no token, not a crash
+        return None
+    return val or None
+
+
+def _owner_repo(url: str) -> str:
+    """`owner/repo` for any GitHub URL of a repository, else ""."""
+    url = (url or "").strip()
+    m = re.match(r"^(?:https?://)?(?:raw\.githubusercontent\.com|github\.com)/([^/]+)/([^/#?]+)",
+                 url)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}".removesuffix(".git")
+    m = re.match(r"^(?:https?://github\.com/)?([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", url)
+    return f"{m.group(1)}/{m.group(2)}" if m else ""
+
+
+def _gh_token() -> str:
+    """The GitHub token Hermes holds for this profile, so a named private store just works.
+
+    Read through Hermes' secret route (`agent.secret_scope.get_secret`), never
+    from another program's login: no `gh auth token` subprocess, no
+    `~/.config/gh/hosts.yml`, no Hermes `auth.json`. `GITHUB_TOKEN` is declared in
+    `plugin.yaml`'s `requires_env`, so this is a credential the user has been told
+    about, not one scavenged off the machine. Cached in memory for a minute
+    because this runs on the browse path; the empty answer is cached too, so a
+    token added later is picked up within the minute rather than never.
     """
     if _GH_TOKEN["token"] is not None and time.time() - _GH_TOKEN["at"] < 60:
         return _GH_TOKEN["token"]
-    token = ""
-    try:
-        import shutil as _shutil
-        import subprocess as _sp
-        gh = _shutil.which("gh")
-        if gh:
-            out = _sp.run([gh, "auth", "token"], capture_output=True, text=True, timeout=15)
-            token = (out.stdout or "").strip()
-    except Exception:  # noqa: BLE001 - an unauthenticated read still works for a public store
-        token = ""
+    token = _hermes_secret("GITHUB_TOKEN") or ""
     _GH_TOKEN.update({"token": token, "at": time.time()})
     return token
 
@@ -372,7 +428,12 @@ def fetch_source(home: Path, force: bool = False) -> Dict[str, Any]:
     """
     url = source_url(home)
     if not url:
-        return {"apps": [], "index": "", "reason": "no store source set"}
+        # No store named. This is not a failure and must not look like one: clear
+        # any remembered error from a previous fetch, or a store that was removed
+        # would leave the panel claiming a broken one.
+        _SOURCE_STATUS["error"] = ""
+        return {"apps": [], "index": "", "repo": "", "store": "",
+                "reason": "no store source set"}
 
     cached = _read_source_cache(home)
     if cached and cached.get("index") == url and not force:
@@ -401,7 +462,8 @@ def fetch_source(home: Path, force: bool = False) -> Dict[str, Any]:
     data = {
         "apps": apps,
         "index": url,
-        "repo": (payload.get("repo") if isinstance(payload, dict) else None) or STORE_URL,
+        "repo": ((payload.get("repo") if isinstance(payload, dict) else None)
+                 or _owner_repo(url) or STORE_URL),
         "store": (payload.get("store") if isinstance(payload, dict) else None) or "Athena Store",
         "updated": payload.get("updated") if isinstance(payload, dict) else None,
         "fetched_at": time.time(),
@@ -990,13 +1052,14 @@ def resolve(home: Path, ref: str) -> Dict[str, Any]:
     # Our own apps first: a name that means something in the Athena Store must
     # not be answered by a same-named stranger in the global catalogue.
     mine = fetch_source(home).get("apps") or []
+    store_git = store_clone_url(home)
     low_mine = ref.lower().rstrip("/")
     for a in mine:
         if (a.get("slug") or "").lower() == low_mine:
-            return _resolved(a, "athena-slug")
+            return _resolved(a, "athena-slug", store_git)
     for a in mine:
         if (a.get("title") or "").lower() == low_mine:
-            return _resolved(a, "athena-title")
+            return _resolved(a, "athena-title", store_git)
 
     data = index(home)
     apps = data["apps"]
@@ -1050,7 +1113,19 @@ def _upstream_name(app: Optional[Dict[str, Any]]) -> Optional[str]:
     return leaf + ".git" if leaf else None
 
 
-def _resolved(app: Dict[str, Any], how: str) -> Dict[str, Any]:
+def store_clone_url(home: Path) -> str:
+    """The git URL of the store the person named, or "" when none is named.
+
+    A store's index lives in a repository, so the clone URL is derived from the
+    index URL the user gave — never from a constant. With no store named this is
+    empty, and `_resolved` says so rather than reaching for a product repository
+    that was never chosen.
+    """
+    repo = _owner_repo(source_url(home))
+    return f"https://github.com/{repo}" if repo else ""
+
+
+def _resolved(app: Dict[str, Any], how: str, store_url: str = "") -> Dict[str, Any]:
     e = _enrich(app)
     out = {"slug": e["slug"], "name": e["name"], "git": e["repo"],
            "repo": e["repo"], "description": e["description"],
@@ -1059,15 +1134,21 @@ def _resolved(app: Dict[str, Any], how: str) -> Dict[str, Any]:
            "converted": e.get("converted"), "guide": e.get("guide"),
            "capabilities": e.get("capabilities")}
     if e["store"] == "athena":
-        # Clone the branch, and name the folder after the app upstream so the
-        # same app does not exist twice under two names.
-        repo = STORE_URL
+        # Clone the app's branch of the store the person named — `install` when
+        # the index record carries it, the configured store otherwise, and never
+        # a repository baked into the product. Then name the folder after the app
+        # upstream so the same app does not exist twice under two names.
+        repo = ""
         m = re.match(r"^(https?://[^#]+)", (e.get("install") or ""))
         if m:
             repo = m.group(1)
+        repo = repo or store_url
         out["git"] = repo
         out["folder"] = _upstream_name(app) or (str(e["slug"]) + ".git")
-        if not e.get("ref"):
+        if not repo:
+            out["error"] = (f"'{e['slug']}' does not say which repository to clone; "
+                            f"name the store it comes from first")
+        elif not e.get("ref"):
             out["error"] = (f"'{e['slug']}' is listed in the Athena Store without "
                             f"a branch, so there is nothing to install")
     return out

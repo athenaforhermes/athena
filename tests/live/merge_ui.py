@@ -282,6 +282,15 @@ for name, body in (("filebox", fb_body), ("sysmon", sm_body)):
     if re.search(r"^\s*(export|import)\b", body, re.M):
         raise SystemExit(f"{name} body still contains import/export")
 
+# A donor's delete handler once carried a fallback to Athena's absolute route.
+# Inside the browser's `/files` sub-context the adapter prefixes paths, so that
+# call resolves to `/files/api/plugins/athena/files/delete` — a doubled URL that
+# can never exist. The relative `/delete` call above it is the only correct one;
+# a regression here fails the merge rather than shipping a dead route.
+_abs = re.findall(r"ctx\.rest\('/api/plugins/athena[^']*'", fb_body)
+if _abs:
+    raise SystemExit(f"file browser calls an absolute plugin mount via ctx.rest: {_abs[0]}")
+
 FILES_BLOCK = f"""
 /* ===================================================== app file browser
  *

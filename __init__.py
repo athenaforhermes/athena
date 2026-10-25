@@ -767,7 +767,8 @@ def handle_files(params, **kwargs):
 
     Two scopes, and both are enforced here rather than left to the routes: reads reach Athena's
     home and every fixed disk (a person picking a file for an app is doing on their own machine
-    what they can already do in Explorer), writes reach Athena's home and the person's own folder.
+    what they can already do in Explorer), and writes reach Athena's home and only the folders
+    the person has named for it -- not, as before, the whole of their home folder.
     The file routes are guarded by a router-level dependency that an in-process caller never runs,
     so this calls the same enforcement itself before dispatching, with the scope the op needs —
     and `_deny_secret` still refuses credential stores on the way through.
@@ -1523,8 +1524,9 @@ SCHEMAS = {
         "Browse and edit files — Athena's folders, and the person's own machine. "
         "Operations: roots (where to start from), list, stat, read, "
         "write, mkdir, delete (to the recycle bin), search (by name), grep (by content). "
-        "Reading reaches Athena's home and every fixed disk; writing reaches Athena's home "
-        "and the person's own folder. Credential stores (~/.ssh, browser password stores, "
+        "Reading reaches Athena's home and every fixed disk; writing reaches Athena's home and "
+        "only the folders the person has named in write_roots. Credential stores (~/.ssh, "
+        "browser password stores, "
         "the Windows hives) are refused wherever they are. A refusal names what is allowed. "
         "Returns per op — list: entries; stat: size/mtime; read: text/is_binary; write: "
         "ok/size; mkdir: path; delete: done/failed; search: entries; grep: hits.",
@@ -1999,10 +2001,261 @@ def _spot(tool: str, params: dict) -> None:
         pass
 
 
+# ------------------------------------------------------------------ approvals
+
+# Before anything that runs or changes code or state, the person is asked.
+#
+# What this answers: a tool call is not a person's decision. `athena_install` clones a
+# repository and runs its own install script; `athena_launch` starts it; `athena_machines`
+# types into a guest and runs commands there; `athena_files` writes and deletes files;
+# publish pushes to GitHub as the person. Any of those can be asked for by a model that was
+# talked into it by a README, a store listing or a file it just read, and nothing between
+# that model and `git clone` was asking.
+#
+# What it deliberately is *not*: a prompt on every Athena call. Gating `athena_status` or
+# `athena_apps` is how people learn to approve without reading, and an approval nobody reads
+# protects nothing -- so every read-only op is listed here by name and stays silent, and only
+# the ops that change something reach the gate.
+#
+# The body is pure string work on purpose. `pre_tool_call` is bounded by
+# `plugins.hook_callback_timeout` and fails CLOSED on timeout (hermes_cli/plugins.py,
+# `_HOOK_TIMEOUT_FAIL_CLOSED_HOOKS`), so a version of this that waited on the engine or on
+# the disk would block tool calls it was never asked about. Nothing here touches either.
+
+_FILES_READ_OPS = ("roots", "list", "stat", "read", "search", "grep")
+_MACHINES_READ_OPS = ("list", "isos", "folders", "screen", "console", "fit", "forgotten")
+_SPACE_READ_ACTIONS = ("", "scan")
+_SCHEDULE_READ_ACTIONS = ("list", "show", "schedules", "ls")
+
+
+def _ap_str(params: Dict[str, Any], *names: str, default: str = "") -> str:
+    """The first of `names` this call actually sent, as text. Never raises."""
+    for n in names:
+        try:
+            v = params.get(n)
+        except Exception:  # noqa: BLE001
+            continue
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return default
+
+
+def _ap_brief(value: Any, limit: int = 200) -> str:
+    """A value short enough to read in a prompt, and never all of it."""
+    t = " ".join(str(value if value is not None else "").split())
+    return t if len(t) <= limit else t[:limit - 3] + "..."
+
+
+def _approval_message(tool: str, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """What is about to happen, or None when this call changes nothing.
+
+    Each branch answers the person's two questions -- what, and where -- in a sentence, because
+    these are read at a prompt rather than parsed. The `rule_key` is the grain an `[a]lways`
+    answer sticks to, so "always allow installing" does not also allow deleting.
+    """
+    # A prompt is only ever built from something the call actually named. Every handler below
+    # returns its "<what> is required" error before it touches anything, so a call with no
+    # subject cannot clone or delete -- and "Athena wants to uninstall that app" is the kind of
+    # message that teaches people to approve without reading, which is the whole thing this is
+    # trying to avoid. Keep those guards in the handlers: this gate leans on them.
+    if tool == "athena_install":
+        ref = _ap_str(params, "url", "name", "app")
+        if not ref:
+            return None
+        return {"message": f"Athena wants to clone and run {ref} as you: the app's own install "
+                           "script runs on this machine with your files and credentials.",
+                "rule_key": "athena:install"}
+
+    if tool == "athena_launch":
+        app = _ap_str(params, "app", "id")
+        if not app:
+            return None
+        return {"message": f"Athena wants to start {app}, which runs its code on this machine "
+                           "as you.",
+                "rule_key": "athena:launch"}
+
+    if tool == "athena_build_app":
+        url = _ap_str(params, "url")
+        subject = url or _ap_str(params, "app", "name", "id")
+        if not subject:
+            return None
+        return {"message": (f"Athena wants to clone {subject} and scaffold it into an app it "
+                            "can install and run as you." if url else
+                            f"Athena wants to smoke-test the app {subject} by starting it on "
+                            "this machine as you."),
+                "rule_key": "athena:build_app"}
+
+    if tool == "athena_delete":
+        app = _ap_str(params, "app", "id")
+        if not app:
+            return None
+        return {"message": f"Athena wants to uninstall {app}: it is stopped and its folder is "
+                           "deleted from disk.",
+                "rule_key": "athena:delete"}
+
+    if tool == "athena_publish":
+        app = _ap_str(params, "app", "id")
+        if not app:
+            return None
+        return {"message": f"Athena wants to publish {app} to the Athena Store on GitHub using "
+                           "your account.",
+                "rule_key": "athena:publish"}
+
+    if tool == "athena_fix":
+        # `provision=False` is the verify-only repair, which changes nothing; the default
+        # re-runs the app's own install script, which is the same act as a first run.
+        if params.get("provision") is False:
+            return None
+        app = _ap_str(params, "app", "id")
+        if not app:
+            return None
+        return {"message": f"Athena wants to repair {app} in place, which can re-run its "
+                           "install script on this machine as you.",
+                "rule_key": "athena:fix"}
+
+    if tool == "athena_settings":
+        # A read when nothing is passed: `get_settings` changes nothing, so it stays silent.
+        fields = [k for k in ("home", "port", "autostart", "share_caches")
+                  if params.get(k) is not None]
+        if not fields:
+            return None
+        what = ", ".join(f"{k}={_ap_str(params, k)}" for k in fields)
+        return {"message": f"Athena wants to change its own settings: {_ap_brief(what)}.",
+                "rule_key": "athena:settings"}
+
+    if tool == "athena_files":
+        op = (_ap_str(params, "op", default="list") or "list").lower()
+        if op in _FILES_READ_OPS:
+            return None
+        where = _ap_brief(_ap_str(params, "path", "paths") or "?", 300)
+        if op == "write":
+            return {"message": f"Athena wants to write the file {where} as you, overwriting it "
+                               "if it is already there.",
+                    "rule_key": "athena:files:write"}
+        if op == "mkdir":
+            name = _ap_str(params, "name")
+            return {"message": f"Athena wants to create the folder "
+                               f"{name + ' in ' + where if name else where} as you.",
+                    "rule_key": "athena:files:mkdir"}
+        if op == "delete":
+            return {"message": f"Athena wants to delete {where} from disk.",
+                    "rule_key": "athena:files:delete"}
+        return {"message": f"Athena wants to run the file op '{op}' on {where}.",
+                "rule_key": f"athena:files:{op}"}
+
+    if tool == "athena_machines":
+        op = (_ap_str(params, "op", default="list") or "list").lower()
+        if op in _MACHINES_READ_OPS:
+            return None
+        name = _ap_str(params, "name") or "that machine"
+        if op == "exec":
+            cmd = _ap_brief(_ap_str(params, "command") or "a command", 300)
+            return {"message": f"Athena wants to run this command inside the {name} machine as "
+                               f"you: {cmd}",
+                    "rule_key": "athena:machines:exec"}
+        if op in ("type", "paste"):
+            what = _ap_brief(_ap_str(params, "text", "paste")
+                             or (_ap_str(params, "key") and _ap_str(params, "key") + " key")
+                             or "keystrokes", 300)
+            return {"message": f"Athena wants to send input to the {name} machine's screen as "
+                               f"you: {what}",
+                    "rule_key": f"athena:machines:{op}"}
+        if op == "create":
+            return {"message": f"Athena wants to create the machine {name} on this computer as "
+                               "you.",
+                    "rule_key": "athena:machines:create"}
+        if op == "delete":
+            return {"message": f"Athena wants to delete the machine {name} and its disk.",
+                    "rule_key": "athena:machines:delete"}
+        if op == "edit":
+            changes = params.get("changes")
+            if isinstance(changes, dict):
+                what = ", ".join(f"{k}={_ap_brief(v, 60)}" for k, v in changes.items())
+            else:
+                what = _ap_brief(changes)
+            return {"message": f"Athena wants to change the {name} machine"
+                               + (f": {_ap_brief(what)}." if what else "."),
+                    "rule_key": "athena:machines:edit"}
+        return {"message": f"Athena wants to run the machine op '{op}' on {name}.",
+                "rule_key": f"athena:machines:{op}"}
+
+    if tool == "athena_space":
+        action = (_ap_str(params, "action") or "").lower()
+        if action in _SPACE_READ_ACTIONS:
+            return None
+        return {"message": f"Athena wants to run the disk action '{action}' on the shared model "
+                           "store, which moves, relinks or deletes files on this machine.",
+                "rule_key": f"athena:space:{action}"}
+
+    if tool == "athena_schedule":
+        action = (_ap_str(params, "action", default="create") or "create").lower()
+        if action in _SCHEDULE_READ_ACTIONS:
+            return None
+        if action in ("stop", "remove", "delete", "cancel", "unschedule"):
+            sid = _ap_str(params, "id", "schedule") or "that repeat"
+            return {"message": f"Athena wants to stop the repeat {sid}.",
+                    "rule_key": "athena:schedule:stop"}
+        app = _ap_str(params, "app")
+        cap = _ap_str(params, "capability")
+        if not (app and cap):
+            return None                      # the handler refuses before creating anything
+        when = _ap_str(params, "schedule") or "on a repeating schedule"
+        return {"message": f"Athena wants to arrange for {app} to run {cap} on its own ({when}) "
+                           "from now on, unattended, as you.",
+                "rule_key": "athena:schedule:create"}
+
+    return None
+
+
+def approve_before_acting(tool_name: str = "", args: Any = None, **_: Any) -> Optional[Dict[str, str]]:
+    """The `pre_tool_call` gate: ask the person before an Athena call acts.
+
+    Returns {"action": "approve", "message": ...} to hand the call to Hermes' own
+    human-approval gate -- the same gate a dangerous shell command goes through, which a model
+    cannot skip -- or None to let it through (reads, and every tool that is not Athena's).
+    Registered in `register` below (see the note there for why this is `approve` and not
+    `block`: a block would be Athena deciding, and this is the person deciding).
+    """
+    tool = str(tool_name or "")
+    if not tool.startswith("athena_"):
+        return None
+    if args is not None and not isinstance(args, dict):
+        # Arguments in a shape the handlers would refuse: not something to describe, and not
+        # something to assume is a read either. Nothing legitimate sends this.
+        return {"action": "approve", "message": f"Athena wants to run {tool}.",
+                "rule_key": tool}
+    params = args if isinstance(args, dict) else {}
+    try:
+        ask = _approval_message(tool, params)
+    except Exception:  # noqa: BLE001
+        # Fail closed: an Athena call this could not describe is still a call that might clone
+        # or delete something, and asking is the cheap side of being wrong about that.
+        return {"action": "approve",
+                "message": f"Athena wants to run {tool}.",
+                "rule_key": tool}
+    if not ask:
+        return None
+    return {"action": "approve", "message": ask["message"], "rule_key": ask["rule_key"]}
+
+
 # ------------------------------------------------------------------ register
 
 
 def register(ctx):
+    # The gate first, and before any tool exists to be called: a plugin whose tools can clone
+    # and run a repository on this machine should not be triggerable by a model's say-so alone.
+    # `pre_tool_call` is the supported route for this (hermes_cli/plugins.py -- `VALID_HOOKS`
+    # and `PluginContext.register_hook`), and `{"action": "approve"}` is its shape for "ask the
+    # person", which a model cannot answer for. A context without `register_hook` still gets the
+    # tools: failing to *load* the plugin would be a worse answer than a missing prompt.
+    try:
+        ctx.register_hook("pre_tool_call", approve_before_acting)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+
     def _tool(key, handler):
         # Every tool announces what it is about *before* it runs, so the arc is up while
         # the work is happening rather than after it. Wrapping here instead of in each

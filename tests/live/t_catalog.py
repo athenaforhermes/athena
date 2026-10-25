@@ -103,8 +103,14 @@ else:
     check("the pinned sha is a real commit, not the placeholder", True)
 
 platforms = entry.get("platforms") or []
-check("the entry claims the platforms we have actually run on",
-      sorted(platforms) == ["linux", "windows"], repr(platforms))
+# Declared honestly: this suite runs on Windows today. `docs/release.md` lists a
+# green run on Linux as an open row, so claiming Linux would be a promise the
+# repo cannot keep. Assert the honest claim in both directions — the tested
+# platform must be there, and no untested platform may be.
+check("the entry claims the platform we have run on",
+      "windows" in platforms, repr(platforms))
+check("the entry claims nothing we have not run on",
+      set(platforms) <= {"windows"}, repr(platforms))
 
 # Same rule the README guard enforces, applied to the file a reviewer reads: the vendored
 # engine's upstream product is not named in anything we publish.

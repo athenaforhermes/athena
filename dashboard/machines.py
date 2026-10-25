@@ -933,6 +933,71 @@ def image_kind_for(name: str) -> str:
     return ""
 
 
+# An image is a body of bytes that becomes the system a machine boots, so the one door it
+# may come through from the network is a TLS fetch. `image.path` is the other door and it
+# is a file a person picked; a URL that is really a local path, a UNC share, an `http://`
+# mirror or a `file://` reference is refused *by name*, not silently fetched — "the bytes
+# changed in transit" is not something this machine can notice afterwards.
+_IMAGE_URL_OK = re.compile(r"^https://[^/\s]+(?::\d{1,5})?(?:/[^\s]*)?$", re.I)
+
+
+def image_url_problem(url: str) -> str:
+    """Why this image URL may not be fetched — or ``""`` when it may. Pure.
+
+    Three shapes are named separately, because they need three different sentences: a
+    scheme that is not https (an image nobody verified), no scheme at all (a file this
+    computer already has, which belongs in ``image.path``), and an https URL with nothing
+    to fetch from.
+    """
+    text = str(url or "").strip()
+    if not text:
+        return "an image URL cannot be empty"
+    if _IMAGE_URL_OK.match(text):
+        return ""
+    if "://" in text:
+        scheme = text.split("://", 1)[0].strip().lower()
+        if scheme != "https":
+            return (f"a machine image may only be fetched over https, and this URL is "
+                    f"{scheme}://… — what arrives over anything else can be swapped in "
+                    f"transit, and it becomes the system this machine boots")
+    if text.lower().startswith("https:"):
+        return f"{text!r} is not an URL an image can be fetched from"
+    return (f"a machine image may only be fetched over https, and {text!r} is not an URL "
+            f"at all — a file this computer already has goes in the machine's image path")
+
+
+# A filename for a fetched image is derived, never taken. The last segment of a URL is text
+# somebody else chose: `..`, an empty segment, a name carrying `/` or `\`, a Windows drive
+# letter, a name Windows refuses to create. `Path(folder) / "image" / ".."` is the machine's
+# own folder and `../../..` is somebody's home, so the segment is reduced to a plain name
+# here — and the caller still refuses anything that would land outside `<machine>/image/`.
+_IMAGE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._+-]")
+_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL"}
+_RESERVED_NAMES |= {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+
+
+def image_filename(url: str, fallback: str = "image") -> str:
+    """The local filename to fetch a URL's image into — a plain name. Pure.
+
+    Everything that is not a letter, a digit or ``._+-`` becomes ``_``; the result is
+    stripped of leading and trailing dots and dashes (so `..`, `.hidden` and `name.` are
+    names, not paths); a reserved Windows device name is prefixed; and an empty result —
+    including a URL that names no path at all, like `https://host` — is the fallback. The
+    answer is always one path segment, and never `.` or `..`.
+    """
+    text = str(url or "").split("#", 1)[0].split("?", 1)[0]
+    rest = text.split("://", 1)[1] if "://" in text else text
+    # Drop `host[:port]`: what is left is the path, and a URL with none of it names nothing.
+    path = rest.split("/", 1)[1] if "/" in rest else ("" if "://" in text else rest)
+    tail = path.rstrip("/\\").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    name = _IMAGE_NAME_CHARS.sub("_", tail.strip()).strip("._-")[:120]
+    if not name:
+        return str(fallback or "image")
+    if name.upper().split(".", 1)[0] in _RESERVED_NAMES or not name[0].isalnum():
+        name = f"image_{name}"
+    return name.strip("._-") or str(fallback or "image")
+
+
 def iso_dir(home: Path, settings: Optional[Dict[str, Any]] = None) -> Path:
     """The folder ISOs live in: the user's choice, or Athena's own inbox.
 
@@ -1934,12 +1999,24 @@ def qemu_prepare_image(spec: "MachineSpec", folder: Path, fetch=None,
     not start downloading because they typed a name. `fetch(url, dest)` is supplied by
     the caller, because progress reporting belongs to whoever owns the job — this
     function owns only the decision of what to fetch and when to reuse it.
+
+    It also owns the two rules about *which* URL and *what name*, because this is the only
+    place a machine image is fetched: https only (`image_url_problem`), and the local file
+    named from the URL rather than by it (`image_filename`), inside `<folder>/image/` and
+    never outside it.
     """
     image = dict(spec.image or {})
     url = str(image.get("url") or "")
     if not url:
         return {"ok": True, "path": str(image.get("path") or ""), "fetched": False}
-    local = Path(folder) / "image" / (url.rstrip("/").split("/")[-1] or "image")
+    problem = image_url_problem(url)
+    if problem:
+        return {"ok": False, "error": problem, "url": url}
+    root = Path(folder) / "image"
+    local = root / image_filename(url)
+    if root.resolve() not in local.resolve().parents:
+        return {"ok": False, "error": f"the name this image URL implies would not land "
+                                      f"inside {root}", "url": url}
     if local.is_file() and local.stat().st_size > 0:
         if log:
             log(f"image already here ({local.stat().st_size // (1 << 20)} MB), not fetching it twice")
@@ -2603,18 +2680,264 @@ def start_elevated(command: str) -> Dict[str, Any]:
 
 # --------------------------------------------------------------------------- wsl verbs
 
+# ------------------------------------------------------------------- closing the host
+#
+# A distro Athena owns runs code an agent asked for. WSL's defaults hand that code the
+# Windows host: every drive is mounted under /mnt, and `interop` lets a Linux process run
+# any .exe with the host's own rights — `notepad.exe` in a shell is a program opened as
+# you, and `/mnt/c/Users/you` is your own folder with your own keys in it. Neither is
+# needed to run an app, and both are closed here, in /etc/wsl.conf, BEFORE the first
+# command runs in a distro Athena created or owns.
+#
+# `attach: true` is the other case and gets the opposite answer: a distro the person
+# already had is theirs, not an execution surface for an agent, so a command in it is
+# refused rather than hardened — writing /etc/wsl.conf into somebody's own Ubuntu would
+# change a machine they use.
+WSL_CONF_PATH = "/etc/wsl.conf"
+WSL_CONF_MARKER = "# written by athena: this distro cannot reach the Windows host"
+WSL_CONF_LINES = (
+    "[automount]",
+    "enabled=false",
+    "[interop]",
+    "enabled=false",
+    "appendWindowsPath=false",
+)
+
+
+def wsl_conf_text() -> str:
+    """What Athena writes into a distro it owns. Pure, so a test can compare the bytes."""
+    return WSL_CONF_MARKER + "\n" + "\n".join(WSL_CONF_LINES) + "\n"
+
+
+def spec_for_distro(distro: str, home: Optional[Path] = None) -> Optional["MachineSpec"]:
+    """The registered machine that names this distro — or None when no machine does.
+
+    `attach: true` wins when two machines name the same distro: the conservative answer is
+    the one that refuses a command, never the one that runs it. The registry is read
+    directly (a handful of `machine.json` files) rather than cached, because the answer
+    gates a refusal — and a stale "we own that" is exactly the failure that matters.
+    """
+    want = str(distro or "").strip().lower()
+    if not want:
+        return None
+
+    def naming(where: Path) -> List["MachineSpec"]:
+        try:
+            return [s for s in list_specs(where) if s.provider == "wsl"
+                    and str(s.distro or "").strip().lower() == want]
+        except Exception:  # noqa: BLE001 — an unreadable registry is not a reason to fail
+            return []
+
+    # The caller's home decides; `default_home()` is looked at as well, because `wsl_exec`
+    # is also reached by a caller that passes no home at all and by one that passes a home
+    # of its own. A spec found in that second home may only ever *refuse* — an attached
+    # machine found elsewhere still means "somebody's own distro", while an owned one found
+    # elsewhere is not enough to write into a disk this home does not name.
+    named = naming(Path(home) if home else default_home())
+    if not named and home:
+        elsewhere = default_home()
+        if elsewhere != Path(home):
+            named = [s for s in naming(elsewhere) if s.attach]
+    if not named:
+        return None
+    return next((s for s in named if s.attach), named[0])
+
+
+def is_athena_distro(distro: str) -> bool:
+    """Whether this distro name is one Athena gives its own machines. Pure.
+
+    `pick_distro` names a distro Athena made `athena-<machine>`, and `wsl_import` is handed
+    exactly that — so the prefix is Athena's own convention rather than a guess. It is the
+    second, registry-independent signal for ownership: `spec_for_distro` reads a folder the
+    engine chose, and if that lookup ever landed on a different home the answer would be
+    "nobody said", which is the one answer that would let a command run in an Athena-owned
+    distro without its host shell having been closed first.
+    """
+    return str(distro or "").strip().lower().startswith("athena-")
+
+
+def distro_is_ours(distro: str, home: Optional[Path] = None) -> Optional[bool]:
+    """True (Athena made it), False (somebody's own, attached), None (nobody said).
+
+    Three answers rather than two, because they lead to three different things: harden it,
+    refuse it, leave it exactly as found. A machine's own record decides first; with no
+    machine naming it, Athena's naming convention still says whose it is; and a distro with
+    neither signal is left alone — this module is also called against distros that are
+    nobody's machine, and inventing an owner for those would harden a stranger's Linux.
+    """
+    spec = spec_for_distro(distro, home)
+    if spec is not None:
+        return not bool(spec.attach)
+    return True if is_athena_distro(distro) else None
+
+
+_HARDENED: set = set()
+
+
+def _shq(text: str) -> str:
+    """`'…'` for bash — a value put into a shell line is quoted, or it is not a value."""
+    return "'" + str(text).replace("'", "'\\''") + "'"
+
+
+def _harden_command() -> str:
+    """The one shell line that writes /etc/wsl.conf and reads it back. Pure.
+
+    `printf` is a bash builtin, so this needs nothing installed: a minimal rootfs may have
+    no `tee` and a busybox may have a different `cat`, but the shell it was asked for is
+    there by definition. The read-back rides in the same command, because "the file is
+    there" has to be evidence rather than an exit code.
+    """
+    lines = " ".join(_shq(ln) for ln in wsl_conf_text().splitlines())
+    return (f"umask 022; mkdir -p /etc; printf '%s\\n' {lines} > {WSL_CONF_PATH}; "
+            f"cat {WSL_CONF_PATH}")
+
+
+def wsl_harden(distro: str, home: Optional[Path] = None, timeout: int = 180,
+               restart: bool = True, force: bool = False) -> Dict[str, Any]:
+    """Close the host shell inside a distro Athena owns. Idempotent, proven by read-back.
+
+    Written as **root**, before anything else runs in the distro, and with no `user` or
+    `cwd` taken from the caller: this is Athena's own act on Athena's own machine. The file
+    is read back and compared, so `ok` means the bytes are in place — an `ok` that only
+    meant "wsl.exe exited 0" is the assumption this exists to replace.
+
+    `restart` terminates the distro so the settings are in force for whatever runs next.
+    WSL reads /etc/wsl.conf when a distro *starts*, so a distro that is already up — with
+    interop on it — would otherwise stay reachable for exactly the command a reviewer came
+    looking for. A terminate that fails is reported, not fatal: the next start applies the
+    file anyway.
+    """
+    exe = wsl_path()
+    if not exe:
+        return {"ok": False, "error": "wsl.exe is not on this machine"}
+    name = str(distro or "").strip()
+    if not name:
+        return {"ok": False, "error": "no distro to harden"}
+    if not force and name.lower() in _HARDENED:
+        return {"ok": True, "already": True, "distro": name, "path": WSL_CONF_PATH}
+    res = _run([exe, "-d", name, "-u", "root", "--", "bash", "-lc", _harden_command()],
+               timeout=timeout)
+    if not res.get("ok") or WSL_CONF_MARKER not in (res.get("text") or ""):
+        return {"ok": False, "distro": name, "path": WSL_CONF_PATH,
+                "error": f"could not write {WSL_CONF_PATH} in {name}: "
+                         + ((res.get("error") or res.get("text") or "").strip()
+                            or f"wsl.exe exited {res.get('code')}")}
+    _HARDENED.add(name.lower())
+    ended = wsl_terminate(name) if restart else {}
+    return {"ok": True, "distro": name, "path": WSL_CONF_PATH, "conf": wsl_conf_text(),
+            "restarted": bool(ended.get("ok")), "restart_error": ended.get("error") or ""}
+
+
+# What a command may be for a distro that is somebody else's to run anyway: being unable to
+# ask it `uname -a` is a different kind of refusal from being unable to install into it.
+_READ_ONLY_COMMANDS = frozenset({
+    "[", ":", "basename", "cat", "cmp", "cut", "date", "df", "diff", "dirname", "du",
+    "echo", "egrep", "exit", "false", "fgrep", "file", "find", "free", "getent", "grep",
+    "groups", "head", "hostname", "id", "journalctl", "ls", "lsb_release", "lsblk", "lscpu",
+    "lsmod", "md5sum", "nl", "nproc", "od", "printenv", "printf", "ps", "pwd", "readlink",
+    "realpath", "rg", "seq", "sha1sum", "sha256sum", "sha512sum", "sleep", "sort", "stat",
+    "strings", "tac", "tail", "test", "tr", "true", "type", "uname", "uniq", "uptime", "wc",
+    "which", "whoami", "wslpath",
+})
+# Flags that turn a reader into a writer: `find` is the command that carries them.
+_WRITE_FLAGS = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf",
+                "-fls")
+_SPLIT_COMMANDS = re.compile(r"\|\||&&|[;|&\n]")
+
+
+def is_read_only_command(command: str) -> bool:
+    """Whether every part of this command only reads. Pure, and deliberately strict.
+
+    Used for one thing: deciding whether a command in somebody else's distro may run. Yes
+    only for a chain whose every command is on a list of readers, with no output
+    redirection, no command substitution and no flag that turns a reader into a writer.
+    Anything unrecognised is **not** read-only: the dangerous commands are the ones nobody
+    thought of, so the answer for them has to be no.
+    """
+    text = str(command or "").strip()
+    if not text or "`" in text or "$(" in text or "${" in text:
+        return False
+    # `2>/dev/null` is how a probe stays quiet, and it writes nothing.
+    cleaned = re.sub(r"\d?>>?\s*(?:/dev/null|&1|&2)", " ", text)
+    if any(ch in cleaned for ch in "<>"):
+        return False
+    parts = [p.strip() for p in _SPLIT_COMMANDS.split(cleaned)]
+    if not parts or any(not p for p in parts):
+        return False
+    for part in parts:
+        words = part.split()
+        head = words[0] if words else ""
+        # A path (`/usr/bin/ls`) and a wrapper (`env`, `xargs`, `sudo`) are both refused:
+        # neither is on the list, and a leading path is how a list gets spoofed.
+        if head not in _READ_ONLY_COMMANDS:
+            return False
+        if any(w in _WRITE_FLAGS for w in words[1:]):
+            return False
+    return True
+
+
+def _wsl_refusal(distro: str, command: str, ours: Optional[bool], approved: bool,
+                 home: Optional[Path]) -> Dict[str, Any]:
+    """The answer that stops a command before it is sent, or `{}` to let it through."""
+    if ours is not False or approved or is_read_only_command(command):
+        return {}
+    spec = spec_for_distro(distro, home)
+    machine = f", attached to the machine {spec.name!r}" if spec else ""
+    return {"ok": False, "code": None, "output": "", "truncated": False, "distro": distro,
+            "command": command, "refused": "attached_distro", "attach": True,
+            "error": (f"refusing to run a command in {distro}{machine}: it is a distro you "
+                      f"own rather than one Athena made, so code in it can read and change "
+                      f"the files you care about. Read-only commands (uname, ls, cat, df …) "
+                      f"still run here, and a command you approve yourself runs as it is. "
+                      f"Point a machine at your own distro if you want to see it on a card "
+                      f"— make an Athena-owned machine when a command has to run somewhere "
+                      f"of its own.")}
+
+
 def wsl_exec(distro: str, command: str, user: str = "", cwd: str = "",
-             timeout: int = 300, max_chars: int = 20000) -> Dict[str, Any]:
+             timeout: int = 300, max_chars: int = 20000, home: Optional[Path] = None,
+             owned: Optional[bool] = None, approved: bool = False) -> Dict[str, Any]:
     """Run a command inside a distro and bring back its output.
 
     `--` sends the rest of the line to Linux untouched, which is the difference
     between running `bash -lc "<your command>"` and having wsl.exe try to
     interpret your pipes itself.
+
+    Two gates stand in front of that command, and both ask *whose* distro this is:
+
+      * `owned=True` — Athena made it, so it is hardened first (`wsl_harden`) and the
+        command then runs. A hardening that fails refuses the command: a distro whose host
+        shell is open is the hole the gate exists to close, and running in it anyway would
+        be reporting the fix and leaving it out.
+      * `owned=False` — somebody's own distro, attached to a machine. Refused, in a
+        sentence naming the machine, unless the command only reads
+        (`is_read_only_command`) or the caller passes `approved=True`, which means a person
+        said yes to *this* command — an agent does not get to pass that for itself.
+
+    `owned=None` asks `distro_is_ours`, so a caller that has never heard of this rule — the
+    panel's host, an agent tool, a shell doing bookkeeping — gets the same answer as one
+    that passes it explicitly: a machine's own record first, then Athena's `athena-<machine>`
+    naming convention. A distro with neither signal is left exactly as it was found —
+    hardening and refusing are both decisions about a distro that is somebody's machine.
     """
     exe = wsl_path()
     if not exe:
         return {"ok": False, "error": "wsl.exe is not on this machine",
                 "needs_setup": wsl_needs_setup()}
+    ours = distro_is_ours(distro, home) if owned is None else bool(owned)
+    refusal = _wsl_refusal(distro, command, ours, approved, home)
+    if refusal:
+        return refusal
+    if ours:
+        hard = wsl_harden(distro, home=home)
+        if not hard.get("ok"):
+            return {"ok": False, "code": None, "output": "", "truncated": False,
+                    "distro": distro, "command": command, "refused": "wsl_conf",
+                    "error": (f"refusing to run a command in {distro}: {hard.get('error')}. "
+                              f"Athena owns this distro, and until {WSL_CONF_PATH} is in "
+                              f"place anything running in it can reach this computer's "
+                              f"drives and start its programs. Fix the distro, or point a "
+                              f"machine at one you keep yourself with `attach`.")}
     argv = [exe, "-d", distro]
     if user:
         argv += ["-u", user]
@@ -2657,12 +2980,29 @@ def wsl_export(distro: str, dest: Path, timeout: int = 3600) -> Dict[str, Any]:
     return {"ok": True, "path": str(dest), "bytes": size, "distro": distro}
 
 
+def _harden_note(distro: str) -> Dict[str, Any]:
+    """Close the host shell in a distro Athena just created, as part of the answer.
+
+    Deliberately *not* fatal. The distro exists and is usable, and `wsl_exec` hardens (and
+    refuses on failure) before anything runs in it — so a hardening that failed here is
+    reported as `hardened: False` with the reason rather than turning a finished import
+    into a failure and leaving half a machine with no way to finish it.
+    """
+    res = wsl_harden(distro)
+    return {"hardened": bool(res.get("ok")), "wsl_conf": str(res.get("path") or WSL_CONF_PATH),
+            "harden_error": "" if res.get("ok") else (res.get("error") or "")}
+
+
 def wsl_import(name: str, rootfs: Path, location: Path, timeout: int = 3600) -> Dict[str, Any]:
     """Create a distro from a rootfs tarball, Athena-owned, in our own folder.
 
     `--install --from-file` is the modern path (it accepts a local file and can
     make a fixed-size disk); `--import` is kept as the fallback because it has
     worked on every WSL 2 release and this has to work on machines we cannot see.
+
+    The moment a distro exists, its host shell is closed (`_harden_note`): WSL reads
+    /etc/wsl.conf when a distro *starts*, so this is the only point where the settings can
+    be in place for the very first command anybody runs in it.
     """
     exe = wsl_path()
     if not exe:
@@ -2675,11 +3015,12 @@ def wsl_import(name: str, rootfs: Path, location: Path, timeout: int = 3600) -> 
                    "--location", str(location), "--no-launch"], timeout=timeout)
     if modern.get("ok"):
         forget_wsl_status()
-        return {"ok": True, "distro": name, "via": "install --from-file"}
+        return {"ok": True, "distro": name, "via": "install --from-file",
+                **_harden_note(name)}
     legacy = _run([exe, "--import", name, str(location), str(rootfs)], timeout=timeout)
     if legacy.get("ok"):
         forget_wsl_status()
-        return {"ok": True, "distro": name, "via": "import"}
+        return {"ok": True, "distro": name, "via": "import", **_harden_note(name)}
     # Both failing is normal on an old WSL, so report the modern attempt's message:
     # it is the one that names the actual problem (a feature not enabled, a file
     # that is not a rootfs) rather than the legacy fallback's generic complaint.

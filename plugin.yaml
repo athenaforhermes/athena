@@ -1,6 +1,6 @@
 name: athena
 version: 1.0.1
-description: "The local AI app store for Hermes. Browse a constantly growing catalogue of apps (image/video/audio/LLM/agent projects) and install, run and stop them natively inside Hermes Desktop, or build your own from any git repository. Every app reuses the credentials Hermes already holds — no second sign-in."
+description: "The local AI app store for Hermes. Browse a constantly growing catalogue of apps (image/video/audio/LLM/agent projects) and install, run and stop them natively inside Hermes Desktop, or build your own from any git repository. When an app needs a token, Athena asks you once and then hands over the credential Hermes already holds — no second sign-in."
 author: "Tala + Zack"
 # The Hermes this plugin was built against. Declared so a version mismatch is a
 # sentence rather than a mystery: the tool surface is registered dynamically, and
@@ -24,6 +24,21 @@ requires_hermes: ">=0.21.0,<0.23.0"
 # admission then rejects the whole resolution and disables the plugin. Android gets
 # psutil from core anyway, so the requirement is simply not needed there.
 python_dependencies: ["send2trash>=1.8,<2", "psutil>=5.9,<9; sys_platform != 'android'", "Pillow>=9,<14", "numpy>=1.24,<3"]
+# The credentials Athena reuses, in Hermes' own vocabulary. Declaring them here is
+# what puts them in front of the person — Hermes offers to set them — instead of
+# Athena scavenging another program's login off the machine, which is what it used
+# to do (`gh auth token`, `hf auth token`, another install's token files, Hermes'
+# own `auth.json`). All four of those reads are gone.
+#
+# Each is read with `agent.secret_scope.get_secret(NAME)`, which honours the
+# active profile's secret scope and fails closed (`UnscopedSecretError`) when none
+# is installed. A missing credential is *absent*, not an error and not a crash:
+# the global catalogue and any public store read fine without a token.
+#
+# `GITHUB_TOKEN` reads a private store the person names themselves — never a store
+# Athena chose. `HF_TOKEN` is handed to an app at launch as an environment
+# variable and is never written to a file; see `dashboard/credentials.py`.
+requires_env: [HF_TOKEN, GITHUB_TOKEN]
 # Every tool this plugin registers, in the order it registers them. An
 # incomplete list is not fatal — the tools still work — but it is the only place
 # a reader can see the whole surface, and `hermes plugins doctor` flags the
@@ -53,3 +68,10 @@ provides_tools:
   - athena_schedule
   - athena_build_app
   - athena_machines
+# The hook this plugin registers, declared for the same reason as the tools
+# above: `__init__.py` registers `pre_tool_call` — the human-approval gate that
+# sits in front of every Athena tool before it can clone or run anything — and
+# `hermes plugins doctor` warns when the manifest does not say so. Keep it in
+# step with `docs/catalog-entry.yaml`, whose `capabilities.provides_hooks` is
+# the same fact for the catalog validator.
+provides_hooks: [pre_tool_call]

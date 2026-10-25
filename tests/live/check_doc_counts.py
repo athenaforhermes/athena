@@ -109,7 +109,15 @@ print(f"       {N} packages, {len(unlicensed)} of them with no licence field: "
 
 check(f"THIRD-PARTY.md says {N} packages", f"{N} packages" in THIRD)
 check(f"NOTICE says {N} packages", f"{N} packages" in NOTICE)
-check(f"README says {N} transitive packages", f"{N} transitive packages" in README)
+# The README used to carry this count too. It is a plugin description now and
+# quotes no package count — the number lives in THIRD-PARTY.md and NOTICE, both
+# checked above, and `inventory()` is what re-derives it from the tree. A README
+# that claimed a *different* number would be the only way to get this wrong, so
+# if a count appears there it still has to agree.
+_rm_counts = set(int(m) for m in re.findall(r"(\d+)\s+(?:transitive\s+)?packages", README))
+check("any package count the README does carry agrees, or it carries none",
+      not _rm_counts or _rm_counts == {N},
+      f"README says {sorted(_rm_counts)}, the tree holds {N}")
 
 bullets = re.findall(r"^- `([^`]+)` — ", THIRD, re.M)
 check(f"THIRD-PARTY.md lists exactly the {N} packages that are here",
@@ -131,37 +139,87 @@ check("the example fixture is not reported as a package",
 
 
 # ---------------------------------------------------------------------------
-# 2. The tool count and the README's table of them.
+# 2. The tool surface the manifest declares, and the one hook both manifests
+#    have to name.
 # ---------------------------------------------------------------------------
 print("\n== the agent tools ==")
 # The registered tool name is the first argument of each `_schema(...)`, not the
 # dict key: two keys are internal handles whose names differ (`app_verify`
 # declares `athena_capabilities`, `history` declares `athena_runs`), and
-# comparing the raw keys against the README's table produced a phantom
-# difference in both directions.
+# comparing the raw keys against a list produced a phantom difference in both
+# directions.
 registered = re.findall(r'^\s{4}"\w+": _schema\(\s*\n\s*"(athena_\w+)"', INIT, re.M)
-table = re.findall(r"^\| `(athena_\w+)`", README, re.M)
 manifest_block = MANIFEST.split("provides_tools:", 1)[1] if "provides_tools:" in MANIFEST else ""
 declared = re.findall(r"^\s+- (\w+)$", manifest_block.split("\n\n", 1)[0], re.M)
 
-print(f"       registered {len(registered)}, README table {len(table)}, manifest {len(declared)}")
-check(f"README says {len(registered)} `athena_*` tools",
-      f"{len(registered)} `athena_*` tools" in README, "README's prose count")
-# The store blurb no longer advertises the tool count: launch copy sells the
-# features and only promises agent control, so docs/catalog-entry.yaml mentions
-# no tools on purpose. README still carries the count and is checked above.
-check("the README's table is exactly the tools that are registered",
-      set(table) == set(registered),
-      f"only in the table: {sorted(set(table) - set(registered))}; "
-      f"missing from the table: {sorted(set(registered) - set(table))}")
+print(f"       registered {len(registered)}, manifest {len(declared)}")
 check("the manifest declares every tool that is registered",
       set(declared) == set(registered),
       f"only declared: {sorted(set(declared) - set(registered))}; "
       f"missing: {sorted(set(registered) - set(declared))}")
 
 
+def _flow_list(text: str, key: str) -> "list[str] | None":
+    """The values of a `key: [a, b]` flow list, or None when the key is absent."""
+    m = re.search(rf"^\s*{key}:\s*\[([^\]]*)\]", text, re.M)
+    if not m:
+        return None
+    return [s.strip() for s in m.group(1).split(",") if s.strip()]
+
+
+# The hook surface, declared where a reader looks for it. `__init__.py` registers
+# `pre_tool_call` (the approval gate in front of every Athena tool); `hermes
+# plugins doctor` warns when the manifest does not say so, and the catalog schema
+# carries the same field. A manifest that under-reports its own surface is the
+# noise that hides a real warning the day there is one.
+registered_hooks = re.findall(r'register_hook\(\s*"(\w+)"', INIT)
+check(f"plugin.yaml declares the hook(s) the plugin registers: {', '.join(registered_hooks) or 'none'}",
+      bool(registered_hooks) and _flow_list(MANIFEST, "provides_hooks") == registered_hooks,
+      f"manifest says {_flow_list(MANIFEST, 'provides_hooks')}, registered {registered_hooks}")
+check("…and so does the catalog entry, so the doctor has nothing to warn about",
+      bool(registered_hooks) and _flow_list(CATALOG, "provides_hooks") == registered_hooks,
+      f"catalog says {_flow_list(CATALOG, 'provides_hooks')}, registered {registered_hooks}")
+
+
 # ---------------------------------------------------------------------------
-# 3. The per-file check counts the README quotes, against this run's output.
+# 3. What the README has to disclose.
+#
+# The README is a plugin description now, not a feature sheet: the package count
+# lives in THIRD-PARTY.md and NOTICE (checked above) and it carries no tool table
+# or tool count. What it *must* still say — because a plugin that runs a
+# stranger's install script on this machine, installs an engine from npm, reaches
+# named endpoints, runs a real OS and pushes to GitHub is a plugin whose reader
+# has to be told so — is the list of things it does. Each of these was added
+# under the store review, and each is a claim that would become a lie by omission
+# if it were quietly dropped, so each is checked against the README's own words.
+# ---------------------------------------------------------------------------
+print("\n== what the README has to disclose ==")
+# Emphasis and code marks are stripped first: these are prose claims, and a `**`
+# moving around inside a sentence must not read as the claim having gone.
+plain = re.sub(r"[*`]", "", re.sub(r"\s+", " ", README)).lower()
+disclosures: list[tuple[str, list[str]]] = [
+    ("third-party install scripts run as the user, with their privileges",
+     ["third-party code runs as you", "that repository's own install script",
+      "your privileges"]),
+    ("the engine comes from npm at a pinned version and is not vendored",
+     ["not vendored here", "pinned to one exact version",
+      "installs that exact version from npm"]),
+    ("which network endpoints it contacts, by name",
+     ["the endpoints it contacts", "api.github.com", "registry.npmjs.org",
+      "cloud-images.ubuntu.com"]),
+    ("its WSL / QEMU machines really execute commands on this computer",
+     ["wsl distribution or a qemu guest", "execute commands and send keystrokes"]),
+    ("GitHub publishing, and that it asks before it pushes",
+     ["athena_publish", "pushes to a github repository you name",
+      "asks before it pushes"]),
+]
+for _label, _needles in disclosures:
+    _missing = [n for n in _needles if n not in plain]
+    check(f"the README says {_label}", not _missing, f"missing: {_missing}")
+
+
+# ---------------------------------------------------------------------------
+# 4. The per-file check counts the README quotes, against this run's output.
 # ---------------------------------------------------------------------------
 print("\n== what the README says each test checks ==")
 flat = re.sub(r"\s+", " ", README)
@@ -210,15 +268,33 @@ elif arg and Path(arg).is_file():
         check(f"{test}: README says {'/'.join(str(s) for s in sorted(said))}, it ran {counts[test]}",
               len(said) == 1 and counts[test] in said,
               f"README says {sorted(said)}, the run printed {counts[test]}")
-    if not compared:
+    if claims and not compared:
         check("the transcript matched the README's claims", False,
               "no claim in the README matched a test that just ran")
-    print(f"       {compared} of {len(claims)} documented count(s) compared against this run")
-    print(f"       (checked for: {', '.join(sorted(claims))})")
+    # The transcript itself still has to be worth reading: a run that produced no
+    # summary lines at all means the plumbing broke, whatever the README says.
+    if not counts:
+        check("the transcript carries run summaries to read", False,
+              f"{arg} held no '<test>\\t<summary>' lines")
+    # The README is a plugin description now and quotes no per-file counts, so
+    # there may be nothing here to compare. That is not the same as the check
+    # having run and passed, so it is said out loud rather than counted as a
+    # match — and it is not the README's hold on this file any more: the
+    # disclosures above are, and they still fail if one is dropped. Should the
+    # README quote counts again, every one of them is compared exactly as before.
+    if claims:
+        print(f"       {compared} of {len(claims)} documented count(s) compared against this run")
+        print(f"       (checked for: {', '.join(sorted(claims))})")
+    else:
+        print(f"       the README quotes no per-file counts now (it is a plugin "
+              f"description); nothing to compare against this run's "
+              f"{len(counts)} summary line(s)")
 else:
-    print(f"  skip per-file counts        no transcript given — "
-          f"{len(claims)} documented count(s) not compared (run_all.sh does compare them)")
-    print(f"       (would check: {', '.join(sorted(claims))})")
+    print("  skip per-file counts        no transcript given — "
+          + (f"{len(claims)} documented count(s) not compared (run_all.sh does compare them)"
+             if claims else "and the README quotes none to compare")
+          )
+    print(f"       (would check: {', '.join(sorted(claims)) or 'nothing'})")
 
 print(f"\ncheck_doc_counts: {PASS} claim(s) checked, {FAIL} failed")
 if FAILURES:

@@ -110,10 +110,21 @@ def ensure_identity(repo_dir: Path) -> None:
 
 
 def field(js: str, name: str):
-    m = re.search(rf'{name}\s*:\s*"((?:[^"\\]|\\.)*)"', js, re.S)
+    """One string field from a launcher's exported object.
+
+    Launchers are hand-written JavaScript and quote either way — the pinned app
+    this suite exercises uses single quotes throughout. Matching double quotes
+    only silently dropped its title and description, so the store published the
+    folder name instead of the app's own words. Both quote styles are read, and
+    the closing quote has to be the same character as the opening one.
+    """
+    m = re.search(
+        rf"{name}\s*:\s*(?:\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)')",
+        js, re.S)
     if not m:
         return None
-    return m.group(1).encode().decode("unicode_escape")
+    raw = m.group(1) if m.group(1) is not None else m.group(2)
+    return raw.encode().decode("unicode_escape")
 
 
 def debrand(text: str) -> str:
@@ -129,6 +140,22 @@ def debrand(text: str) -> str:
     text = re.sub(r"\bpinokio\b", "", text)
     text = re.sub(r"\s{2,}", " ", text)
     return text.strip(" -|")
+
+
+def debrand_name(text: str) -> str:
+    """Remove the vendor name from an identifier Athena publishes itself.
+
+    A folder name is provenance and stays exactly as it is; a slug or a fallback
+    title is Athena's own word for the app, and the store does not advertise the
+    vendor in its listings. `yue2-groove-pinokio` already had an explicit slug
+    mapping for this reason; the derived fallback now agrees with it instead of
+    publishing `athena-facefusion-pinokio`.
+    """
+    if not text:
+        return text
+    text = re.sub(r"(?i)(?:^|(?<=[._\s-]))pinokio(?:$|(?=[._\s-]))", "", text)
+    text = re.sub(r"[\s._]{2,}", " ", text)
+    return text.strip(" ._-|")
 
 
 def app_files(app: Path) -> list[str]:
@@ -178,7 +205,7 @@ def describe(app: Path, slug: str, name: str, repo: str, files: list[str]) -> di
         # is being removed under this scan. Describe it as an app with no
         # launcher text, which is honest, instead of raising on a dead path.
         js = ""
-    title = field(js, "title") or app.name.replace(".git", "")
+    title = field(js, "title") or debrand_name(app.name.replace(".git", ""))
     desc = debrand(field(js, "description") or "")
     version = field(js, "version") or "1.0"
     icon = field(js, "icon")
@@ -233,7 +260,11 @@ def slug_for(folder: str) -> str:
     key = folder[:-4].lower() if folder.lower().endswith(".git") else folder.lower()
     if key in SLUGS:
         return SLUGS[key][0]
-    return "athena-" + re.sub(r"[^a-z0-9]+", "-", key).strip("-")
+    # A slug is Athena's own branch name for the app, so it carries no vendor
+    # name — matching what the explicit SLUGS entries above already do. The
+    # folder name itself stays untouched as provenance.
+    clean = re.sub(r"[^a-z0-9]+", "-", debrand_name(key)).strip("-")
+    return "athena-" + (clean or "app")
 
 
 def apps_in(home: Path) -> list[Path]:

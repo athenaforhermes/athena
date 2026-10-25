@@ -1,7 +1,7 @@
 # Naming — what Athena calls its own things
 
 One table, so no task invents a second answer. The rule behind it: **Athena names
-what Athena owns.** The vendored engine keeps its own internals (never forked),
+what Athena owns.** The pinned engine keeps its own internals (never forked),
 so a legacy file the engine writes or reads is converted, shimmed, or whitelisted
 — never renamed out from under it.
 
@@ -27,7 +27,7 @@ Already Athena's, no change: the home (`<hermes>/athena`), the ports
 A guard test (`cache/scratch/t_names.py`) fails when the legacy name appears on a
 visible surface. These are the only surfaces it may appear on:
 
-1. **The MIT `LICENSE` and copyright headers** in the vendored engine. Keeping
+1. **The MIT `LICENSE` and copyright headers** in the engine's own tree. Keeping
    them is a condition of the license.
 2. **Upstream repository URLs** in the store index (`github.com/pinokiofactory/…`,
    `deadjoe/yue2-groove-pinokio`). Install source and provenance.
@@ -40,7 +40,7 @@ visible surface. These are the only surfaces it may appear on:
    The same goes for the four lines of copy in that panel (looking for / found /
    none detected).
 7. **Source comments** that describe the engine's real behaviour (its home
-   directory, its env vars). They document the vendored code, they are not
+   directory, its env vars). They document the engine's code, they are not
    rendered anywhere, and a comment that misnames a path is worse than one that
    names it correctly.
 8. **The shim's own filename** in the agent's file list and in a doc's file tree.
@@ -79,8 +79,9 @@ folder is exactly as upstream published it.
 
 ## Re-applying after an engine update
 
-The engine is vendored, never patched (Option A). Bumping the engine is: install
-the tarball → run `t_names.py`, `t_ladder.py`, `t_smoke.py`, `t_store.py`,
+The engine is installed from npm at a pinned version, never patched (Option A).
+Bumping the engine is: raise the pin in `engine/package.json`, `npm ci` in
+`engine/` → run `t_names.py`, `t_ladder.py`, `t_smoke.py`, `t_store.py`,
 `t_build.py`, `t_agent_tools.py`. If `t_names.py` complains about a new engine
 surface, the fix belongs at the boundary (the scrub pass), not in the engine.
 

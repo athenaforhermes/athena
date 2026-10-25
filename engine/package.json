@@ -1,0 +1,7 @@
+{
+  "name": "athena-engine",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Athena's engine: pinokiod installed from npm at the pinned version, not vendored",
+  "dependencies": { "pinokiod": "8.2.0" }
+}

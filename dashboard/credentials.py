@@ -13,36 +13,79 @@ reasoned about without one being constructed first. Everything here that needs t
 know where Athena lives is handed the engine, and the callers in `plugin_api` keep
 their old zero-argument shapes through thin wrappers.
 
-What this file deliberately does NOT do: it never writes a credential value into a
-log, a response or an exception. It reports *names and places*, and copies files.
+**One rule, and it is the whole file: a credential is read through Hermes, and a
+credential is never written to a file.** The two names this plugin declares
+(`HF_TOKEN`, `GITHUB_TOKEN` — `plugin.yaml`'s `requires_env`) are read with
+`agent.secret_scope.get_secret(NAME)`, which honours the active profile's secret
+scope and fails closed (`UnscopedSecretError`) when the process is multiplexing
+with no scope installed. Failing closed is answered here as "this machine holds no
+such credential" — `available: False` — never as a crash, and never as a fallback
+read of some other store.
 
-What it *does* write, and why — stated plainly, because the earlier version of this
-docstring read as a stronger guarantee than the code made. Some apps read a
-credential from a path and cannot be reached by an environment variable, so a
-plaintext file form survives for them: owner-only permissions, inside a directory
-the file browser refuses as a credential store, never logged, never sent off the
-machine. `credential_env` is the form a launch should prefer, because an environment
-variable leaves no copy behind. The files are the fallback for apps that cannot be
-reached any other way; removing them outright would break those apps' sign-in, so
-the two forms exist together rather than one replacing the other. What is still
-missing is encryption at rest, which needs a keyring dependency this plugin does not
-yet carry.
+What this file deliberately does NOT do, because an earlier version did: it does
+not shell out to `gh auth token` or `hf auth token`; it does not read
+`~/.cache/huggingface/token` or `~/.huggingface/token`; it does not read an
+existing Pinokio install's token files; and it does not read Hermes' `auth.json`.
+Every one of those is another program's credential store, which a plugin may not
+open (plugin-catalog admission rule 11 — credentials come through Hermes, never
+from files).
+
+It also does not write a token anywhere: no `cache/HF_AUTH/token`, no
+`connect/huggingface/auth.json`, no `credentials/github.json`. A token reaches an
+app as an environment variable for the life of the process that needs it
+(`credential_env`), and is written nowhere — so no plaintext copy outlives the app,
+survives in a backup or a folder sync, or stays readable after the app is gone.
+
+What it *does* write is configuration, never a credential: `seed_credentials` keeps
+`<home>/gitconfig` (long paths, a committer name) because a clone on Windows needs
+it, and that file holds no secret. The rest reports *names and places*, never a
+token value, in a log, a response or an exception.
 """
 from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-# ---------------------------------------------------------------- credentials
+# ----------------------------------------------------------- Hermes' own route
 
 
 def hermes_home() -> Path:
     return Path(os.environ.get("HERMES_HOME") or (Path.home() / "AppData/Local/hermes"))
+
+
+def _get_secret(name: str) -> Optional[str]:
+    """Read a declared credential through Hermes' secret route, or None.
+
+    THE only credential read in this file. `agent.secret_scope.get_secret` honours
+    the active profile — under a multiplexed gateway another profile's key is not
+    visible — and raises `UnscopedSecretError` when no scope is installed. Both
+    "no scope active" and "not set" are the same answer to a caller here: this
+    machine holds no credential to lend. Bare `os.environ` is never used as the
+    fallback; `agent.secret_scope` owns that decision and makes it correctly
+    (single-profile deployments inject credentials through the process env and the
+    scope reads them there — this module does not second-guess that).
+
+    `agent` is absent when this module is loaded outside the Hermes process (the
+    live suite imports it under the plugin's own venv), which is the same answer
+    again. The value is never logged and never written to a file.
+    """
+    try:
+        from agent.secret_scope import get_secret  # type: ignore
+    except Exception:  # noqa: BLE001 - not running inside Hermes
+        return None
+    try:
+        val = get_secret(name)
+    except Exception:  # noqa: BLE001 - incl. UnscopedSecretError: no credential, not a crash
+        return None
+    return val or None
+
+
+def _masked(token: str) -> str:
+    """A display form: enough to recognise, not enough to use. Never logged."""
+    return (token[:4] + "…" + token[-4:]) if len(token) > 8 else "…"
 
 
 def athena_home(engine: Any) -> Path:
@@ -56,42 +99,13 @@ def athena_home(engine: Any) -> Path:
     return Path(engine.home)
 
 
-def hermes_env(engine: Any) -> Dict[str, str]:
-    return dict(os.environ)
-
-
-def _lock_down(path: Path, directory: bool = False) -> None:
-    """Owner-only, best effort, on both kinds of filesystem.
-
-    On POSIX the mode bits do the work. On Windows they do not: `os.chmod` only
-    moves the read-only flag, so a file one account writes stays readable by
-    every other account on the machine. The access control list is what actually
-    decides, so it is rewritten to name the owner and nothing else — inheritance
-    off, so the parent folder's grants do not re-open it.
-    """
-    try:
-        os.chmod(path, 0o700 if directory else 0o600)
-    except Exception:  # noqa: BLE001
-        pass
-    if os.name == "nt":
-        try:
-            user = os.environ.get("USERNAME") or ""
-            if user:
-                subprocess.run(["icacls", str(path), "/inheritance:r",
-                                "/grant:r", f"{user}:F"],
-                               capture_output=True, timeout=20)
-        except Exception:  # noqa: BLE001
-            pass
-
-
 def credential_env(engine: Any) -> Dict[str, str]:
-    """The credentials an app should be handed at launch, as environment.
+    """The credentials an app is handed at launch, as environment.
 
-    The preferred mechanism. An environment variable lives for the life of the
-    process and is written nowhere, so no plaintext copy outlives the app that
-    needed it. The file forms in `seed_credentials` remain only because some
-    apps read a path that no environment can reach; a launch that *can* use
-    this should, and should not need the files at all.
+    The only way a token reaches an app. An environment variable lives for the
+    life of the process it is handed to and is written nowhere, so no plaintext
+    copy outlives the app that needed it — which is exactly what the file forms
+    this module used to write could not promise.
     """
     out: Dict[str, str] = {}
     try:
@@ -111,7 +125,12 @@ def credential_env(engine: Any) -> Dict[str, str]:
 
 
 def pinokio_home() -> Optional[Path]:
-    """Home of an existing Pinokio install, if the user has one."""
+    """Home of an existing Pinokio install, if the user has one.
+
+    A *path*, read from Pinokio's own `config.json` — that an install is present
+    is a fact worth knowing when offering to build on it. No token of Pinokio's is
+    read from anywhere: its credential store is not ours to open.
+    """
     try:
         cfg = Path.home() / ".pinokio" / "config.json"
         if cfg.exists():
@@ -124,121 +143,72 @@ def pinokio_home() -> Optional[Path]:
 
 
 def pinokio_hf_tokens() -> List[Path]:
-    """HuggingFace token files an existing Pinokio install already holds."""
-    home = pinokio_home()
-    if not home:
-        return []
-    return [
-        home / "cache" / "HF_AUTH" / "token",
-        home / "connect" / "huggingface" / "auth.json",
-        home / "key.json",
-    ]
+    """Always empty.
+
+    This used to name a Pinokio install's HuggingFace token files
+    (`cache/HF_AUTH/token`, `connect/huggingface/auth.json`, `key.json`) so they
+    could be read and reused. A token is no longer read from another program's
+    store — it comes from Hermes' secret route (`_get_secret`). The name is kept
+    because callers exist; the answer is "none".
+    """
+    return []
 
 
 def collect_credentials(engine: Any) -> Dict[str, Any]:
-    """Credential sources Hermes already holds, so the user never re-enters them."""
+    """The credentials Hermes holds for this profile, and where they come from.
+
+    Two names, both declared in `plugin.yaml`'s `requires_env` and both read with
+    `agent.secret_scope.get_secret`: `GITHUB_TOKEN` and `HF_TOKEN`. There is no
+    other source — no `gh`/`hf` subprocess, no `~/.cache/huggingface/token`, no
+    Pinokio token file, no direct read of Hermes' `auth.json`.
+
+    `providers` stays an empty mapping on purpose: listing the model providers in
+    Hermes' `auth.json` means reading Hermes' credential store directly, which is
+    the read this module no longer makes.
+
+    The shape is unchanged so existing callers keep working. `token` is what
+    `credential_env` hands to an app; `masked` is a display form, and the
+    `/credentials` route strips `token` before it answers.
+    """
+    del engine  # where Athena lives is not a credential source; the shape keeps it
     sources: Dict[str, Any] = {}
 
-    # GitHub via gh CLI (keyring-backed)
-    gh = shutil.which("gh")
-    if gh:
-        try:
-            out = subprocess.run([gh, "auth", "token"], capture_output=True,
-                                 text=True, timeout=20)
-            tok = (out.stdout or "").strip()
-            if tok:
-                sources["github"] = {"available": True, "source": "gh CLI", "token": tok,
-                                     "masked": tok[:4] + "…" + tok[-4:]}
-        except Exception:
-            pass
-    if "github" not in sources:
-        sources["github"] = {"available": False, "source": "gh CLI (not logged in)"}
+    gh = _get_secret("GITHUB_TOKEN") or ""
+    sources["github"] = (
+        {"available": True, "source": "Hermes (GITHUB_TOKEN)", "token": gh,
+         "masked": _masked(gh)}
+        if gh else {"available": False, "source": "Hermes (GITHUB_TOKEN not set)"})
 
-    # HuggingFace via the hf CLI in Hermes' venv, else a stored token file
-    hf = shutil.which("hf") or shutil.which("huggingface-cli")
-    hf_tok = ""
-    if hf:
-        try:
-            out = subprocess.run([hf, "auth", "token"], capture_output=True,
-                                 text=True, timeout=20)
-            hf_tok = (out.stdout or "").strip().splitlines()[-1] if out.stdout else ""
-        except Exception:
-            hf_tok = ""
-    if not hf_tok:
-        for cand in (Path.home() / ".cache/huggingface/token",
-                     Path.home() / ".huggingface/token"):
-            if cand.exists():
-                hf_tok = cand.read_text(encoding="utf-8").strip()
-                break
-    if not hf_tok:
-        # Last resort: a HuggingFace token the user already gave an existing
-        # Pinokio install. Reusing it is the whole point — no second login.
-        for cand in pinokio_hf_tokens():
-            try:
-                raw = cand.read_text(encoding="utf-8").strip()
-            except Exception:
-                continue
-            if not raw:
-                continue
-            if raw.startswith("{"):
-                try:
-                    hf_tok = json.loads(raw).get("access_token") or ""
-                except Exception:
-                    hf_tok = ""
-            else:
-                hf_tok = raw
-            if hf_tok:
-                break
+    hf = _get_secret("HF_TOKEN") or ""
     sources["huggingface"] = (
-        {"available": True, "source": "hf CLI", "token": hf_tok,
-         "masked": hf_tok[:4] + "…" + hf_tok[-4:] if len(hf_tok) > 8 else "…"}
-        if hf_tok else {"available": False, "source": "hf CLI (no token)"}
-    )
+        {"available": True, "source": "Hermes (HF_TOKEN)", "token": hf,
+         "masked": _masked(hf)}
+        if hf else {"available": False, "source": "Hermes (HF_TOKEN not set)"})
 
-    # Model / provider keys from Hermes auth.json
-    pool: Dict[str, Any] = {}
-    try:
-        auth = json.loads((hermes_home() / "auth.json").read_text(encoding="utf-8"))
-        for prov, entries in (auth.get("credential_pool") or {}).items():
-            if isinstance(entries, list) and entries:
-                first = entries[0] if isinstance(entries[0], dict) else {}
-                key = first.get("api_key") or first.get("access_token") or first.get("key")
-                if key:
-                    pool[prov] = {"available": True, "masked": str(key)[:4] + "…"}
-    except Exception:
-        pass
-    sources["providers"] = pool
+    sources["providers"] = {}
     return sources
 
 
 def seed_credentials(engine: Any, target_home: Path) -> Dict[str, Any]:
-    """Write Hermes-held credentials into the Athena home so apps inherit them."""
-    creds = collect_credentials(engine)
+    """Make an app's home usable — without writing a single token into it.
+
+    This used to copy Hermes' HuggingFace and GitHub tokens into the Athena home
+    as plaintext files (`cache/HF_AUTH/token`, `connect/huggingface/auth.json`,
+    `credentials/github.json`) so that apps which read a path would inherit them.
+    That write is gone and is not coming back: a token written to a path outlives
+    the app that needed it, rides along in any backup or sync of that folder, and
+    on Windows the file's permissions do not keep another account on the machine
+    out. A token now reaches an app as an environment variable at launch
+    (`credential_env`), for the life of the process, written nowhere.
+
+    What is left is configuration, not credentials: `gitconfig` (long paths, a
+    committer name), which holds no secret. `written` names only those files, so
+    a caller can never report a token as seeded. Returns the same keys as before,
+    so existing callers keep working unchanged.
+    """
     written: List[str] = []
-
-    # HuggingFace — both formats pinokiod understands.
-    hf = creds.get("huggingface") or {}
-    if hf.get("available") and hf.get("token"):
-        tok = hf["token"]
-        hf_auth = target_home / "cache" / "HF_AUTH"
-        hf_auth.mkdir(parents=True, exist_ok=True)
-        (hf_auth / "token").write_text(tok, encoding="utf-8")
-        _lock_down(hf_auth, directory=True)
-        _lock_down(hf_auth / "token")
-        written.append("cache/HF_AUTH/token")
-        connect = target_home / "connect" / "huggingface"
-        connect.mkdir(parents=True, exist_ok=True)
-        (connect / "auth.json").write_text(json.dumps(
-            {"access_token": tok, "token_type": "bearer", "source": "hermes"},
-            indent=2), encoding="utf-8")
-        _lock_down(connect, directory=True)
-        _lock_down(connect / "auth.json")
-        written.append("connect/huggingface/auth.json")
-
-    # GitHub — git credential config so git clones authenticate as the user.
-    gh = creds.get("github") or {}
-    if gh.get("available") and gh.get("token"):
-        gc = target_home / "gitconfig"
+    try:
+        gc = Path(target_home) / "gitconfig"
         text = gc.read_text(encoding="utf-8") if gc.exists() else ""
         if "[user]" not in text:
             text += "\n[user]\n  name = athena\n"
@@ -246,13 +216,15 @@ def seed_credentials(engine: Any, target_home: Path) -> Dict[str, Any]:
             text = "[core]\n  longpaths = true\n" + text
         gc.write_text(text, encoding="utf-8")
         written.append("gitconfig")
-        (target_home / "credentials" ).mkdir(parents=True, exist_ok=True)
-        _lock_down(target_home / "credentials", directory=True)
-        (target_home / "credentials" / "github.json").write_text(json.dumps(
-            {"token": gh["token"], "source": "hermes-gh-cli"}, indent=2), encoding="utf-8")
-        _lock_down(target_home / "credentials" / "github.json")
-        written.append("credentials/github.json")
+    except Exception:  # noqa: BLE001 - a home that cannot be written is not a failure here
+        pass
 
+    try:
+        creds = collect_credentials(engine)
+    except Exception:  # noqa: BLE001
+        creds = {}
+    gh = creds.get("github") or {}
+    hf = creds.get("huggingface") or {}
     return {"ok": True, "written": written,
             "github": bool(gh.get("available")),
             "huggingface": bool(hf.get("available")),

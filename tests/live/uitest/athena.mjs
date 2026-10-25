@@ -2430,36 +2430,9 @@ async function startInstall(ctx, key, slug, label) {
   }
 }
 
-/* Whether anyone has this working on a machine shaped like this one.
-   The catalogue declares no VRAM and no disk figure — never has — so the only
-   honest rig-fit facts a store row carries are the *check-ins*: has somebody ever
-   reported this app from Windows, from an NVIDIA card. That is evidence, not a
-   requirement, and the wording keeps the two apart: "runs on Windows" is something
-   people did, not something the app demands. A row nobody has checked in from is
-   an absence of evidence, said as an absence. */
-function rigBadge(app) {
-  const p = (app && app.platforms) || {}
-  const g = (app && app.gpus) || {}
-  const n = (app && app.checkins) || 0
-  if (!n || (!p.windows && !p.mac && !p.linux && !g.nvidia && !g.amd && !g.apple)) {
-    return { cls: '', text: 'nobody has run it',
-      title: 'No check-ins yet. That is an absence of evidence, not a verdict on the app.' }
-  }
-  if (p.windows && g.nvidia) {
-    return { cls: 'run', text: 'runs on Windows',
-      title: `${n} check-in${n === 1 ? '' : 's'} here, including Windows on NVIDIA — the same shape as this box. Says nothing about speed.` }
-  }
-  if (p.windows) {
-    return { cls: '', text: 'Windows, no NVIDIA',
-      title: `${n} check-in${n === 1 ? '' : 's'} from Windows, but none from an NVIDIA card — it may be CPU-only, or just new.` }
-  }
-  return { cls: 'need', text: 'no Windows check-in',
-    title: `${n} check-in${n === 1 ? '' : 's'}, none of them from Windows. It may still work — nobody has said so yet.` }
-}
-
-/* The filter pair to `rigBadge`: whatever the badge claims, this keeps — the two
-   cannot disagree, and the count under the bar says it is counting the loaded
-   page, because the store's ranking cannot be asked for this across 6,400 apps. */
+/* The chip's filter: what the count line under the bar claims, this keeps — the
+   two cannot disagree, and the count says it is counting the loaded page,
+   because the store's ranking cannot be asked for this across 6,400 apps. */
 function rigMatch(app, on) {
   if (!on) return true
   const p = (app && app.platforms) || {}
@@ -2530,9 +2503,6 @@ function StoreCard({ ctx, app, onInstalled }) {
           // the store until it is true of every app, not just the converted ones.
           app.store === 'athena'
             ? jsx('span', { className: 'ah-badge own', children: 'Athena Store' }) : null,
-          (() => { const b = rigBadge(app)
-            return jsx('span', { className: 'ah-badge' + (b.cls ? ' ' + b.cls : ''),
-              title: b.title, children: b.text }) })(),
         ] }),
         repo ? jsx('div', { className: 'ah-repo', children: repo }) : null,
       ] }),
@@ -3153,8 +3123,8 @@ function needList(value) {
 /* Walking to a folder instead of typing one. Folders only, one level at a time, with a
    way up that stops at the root and a way in that is a click. "Use this folder" means
    the folder you are standing in, so nothing depends on what a text box says. The
-   Windows dialog is offered when the app happens to expose one — it is not required,
-   because a plugin cannot count on it. */
+   host's own dialog is offered when the SDK exposes one — it is not required, a plugin
+   cannot count on it, and it can only pick a file (see the note at the picker below). */
 function FolderPicker({ ctx, start, onUse, onClose, busy }) {
   const [here, setHere] = useState(String(start || ''))
   const [data, setData] = useState(null)
@@ -3175,16 +3145,28 @@ function FolderPicker({ ctx, start, onUse, onClose, busy }) {
 
   const d = data || {}
   const dirs = d.dirs || []
-  const native = typeof window !== 'undefined' && window.hermesDesktop &&
-    typeof window.hermesDesktop.selectPaths === 'function'
+  /* The host's own file dialog, through the plugin SDK: `ctx.os.pickOpenPath`
+     answers with one path or null (apps/desktop/src/contrib/plugin.ts:82) and takes
+     `PluginFileDialogOptions` — `defaultPath`, `filters`, `title` and nothing else
+     (same file, line 105). There is no `directories` flag in that surface, and the
+     SDK never adds one (it forwards `{ ...options, multiple: false }` to the host
+     bridge, line 261), so a *folder* cannot be asked for. What this asks for is a
+     file, and the folder it answers with is the one that file lives in. That is why
+     the list above is the real picker and this is only a shortcut for a person who
+     already knows one of the files in there. No host picker, no button — and a path
+     with no folder above it says so instead of quietly setting nothing. */
+  const native = !!(ctx && ctx.os && typeof ctx.os.pickOpenPath === 'function')
   const pickNative = useCallback(async () => {
     try {
-      const picked = await window.hermesDesktop.selectPaths({ directories: true, multiple: false,
-        title: 'Where the machine images live', defaultPath: here })
-      const one = (picked && picked[0]) || (picked && picked.paths && picked.paths[0]) || ''
-      if (one) onUse(String(one))
+      const picked = await ctx.os.pickOpenPath({
+        title: 'Pick any file in the folder where the machine images live', defaultPath: here })
+      const one = String(picked || '')
+      const dir = one.replace(/[\\/][^\\/]*$/, '')
+      if (dir && dir !== one) { onUse(dir); return }
+      setErr(one ? 'That path has no folder above it \u2014 use the list below.'
+        : 'Nothing was picked \u2014 use the list below.')
     } catch (e) { setErr(String(e)) }
-  }, [here, onUse])
+  }, [ctx, here, onUse])
 
   return jsxs('div', { className: 'ah-notice', children: [
     jsx('div', { className: 'ah-sub', children: 'The folder your images live in. Only folders are ' +
@@ -3212,7 +3194,7 @@ function FolderPicker({ ctx, start, onUse, onClose, busy }) {
       jsx(Button, { size: 'micro', disabled: !!busy || reading || d.ok === false,
         onClick: () => onUse(here), children: busy === 'iso-folder' ? 'pointing\u2026' : 'Use this folder' }),
       native ? jsx(Button, { size: 'micro', variant: 'ghost', onClick: pickNative,
-        children: 'Windows folder dialog\u2026' }) : null,
+        children: 'Pick a file inside it\u2026' }) : null,
       jsx(Button, { size: 'micro', variant: 'ghost', onClick: onClose, children: 'Cancel' }),
     ] }),
   ] })
@@ -6034,7 +6016,8 @@ function SettingsTab({ ctx, st, refresh }) {
         : 'Reading\u2026',
       children: jsxs('div', { children: [
         jsx('div', { className: 'ah-sub', children:
-          'Athena reuses what Hermes already holds. You should never have to sign in twice.' }),
+          'Athena can hand an app the credentials Hermes already holds. You approve each '
+          + 'one, so you never sign in twice.' }),
         creds ? jsxs('div', { children: [
           jsx(ListRow, {
             title: 'GitHub',
@@ -7077,7 +7060,7 @@ function SendToApp({ ctx }) {
   const s = useSendToApp(ctx)
   const view = acceptsPanel(s.data, { name: s.file })
   if (!s.file) {
-    return jsx('div', { className: 'ah-send idle', children: view.head })
+    return null
   }
   const pace = s.snap && s.snap.state ? jobPace(s.snap) : null
   const done = s.snap && s.snap.state && s.snap.state !== 'running'
@@ -7881,7 +7864,12 @@ function Preview({ ctx, t, entry, refetch, select, onExpand }) {
     setOpBusy(true)
     try {
       const r = await ctx.rest('/delete', { method: 'POST', timeoutMs: 30000, body: { paths: [entry.path] } })
-      if (!r?.ok) opErr((r?.failed?.[0]?.error) || 'delete failed')
+      if (!r?.ok) {
+        opErr((r?.failed?.[0]?.error) || 'delete failed — the file is still there')
+        setConfirmDel(false)
+        setOpBusy(false)
+        return
+      }
       select(null)
       refetch()
     } catch (e) { opErr(e) }
@@ -8054,7 +8042,7 @@ function MultiPanel({ ctx, t, entries, cwd, clearSel, refresh }) {
     if (!confirmDel) { setConfirmDel(true); return }
     run(async () => {
       const r = await ctx.rest('/delete', { method: 'POST', timeoutMs: 120000, body: { paths } })
-      if (!r?.ok) throw new Error((r?.failed?.[0]?.error) || 'delete failed')
+      if (!r?.ok) throw new Error((r?.failed?.[0]?.error) || 'delete failed — the files are still there')
     })
   }
   return jsxs('div', { className: 'hermes-fb-preview', children: [
@@ -9451,7 +9439,6 @@ export const __fns = {
   FolderPicker,   // walking to the image folder instead of typing its path,
   JobProgress,   // the bar a job draws: bytes when there are bytes, a label when there are not,
   MachineCard,   // a machine's card: its chip, its verb, the console behind,
-  rigBadge,   // whether anyone has this app working on a box like this one,
   rigMatch,   // the store filter for apps checked in from Windows on NVIDIA,
   RunsRow,   // one recorded run,
   AutoTerm,   // the auto-following output box,

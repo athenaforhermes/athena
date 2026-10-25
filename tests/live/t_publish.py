@@ -225,11 +225,19 @@ check("a store you can read but not log in to is refused, and names the fix",
       "no GitHub credential" in str(api.publish_app("demo.git").get("error")),
       str(api.publish_app("demo.git")))
 
-# Now let it actually run, against the bare repo standing in for GitHub.
+# Now let it actually run, against the bare repo standing in for GitHub. Both
+# halves of the approval contract are proven here, because they are two different
+# promises and one run can only show one of them: the push is a force-push (it
+# rewrites every branch of the store), so an approved publish has to go through
+# and say what it did, and an unapproved one has to send nothing and say exactly
+# that. Approving by assertion would leave the second half untested, and testing
+# only the second half would leave the first untested.
 good = {**no_token, "token": "test-token-not-used-locally",
         "checkout": str(tmp / "card-checkout")}
 api._store_info = lambda home=None: good
-res = api.publish_app("demo.git")
+
+# --- approved: the publish goes through, and the log says what it did ---
+res = api.publish_app("demo.git", approve=True)
 check("a publish answers with a job rather than making the card wait",
       bool(res.get("ok")) and bool(res.get("job")), str(res))
 check("and names the branch it will write", res.get("branch") == "athena-demo", str(res))
@@ -249,8 +257,38 @@ result = snap.get("result") or {}
 check("the result names the branches", "athena-demo" in (result.get("branches") or []),
       str(result.get("branches")))
 check("it pushed", result.get("pushed") is True, str(result)[:220])
+# The remote is the witness, not the job's report of itself: the branch has to be
+# on the bare repo, which is the only thing that outlives this process.
 pushed_refs = git("for-each-ref", "--format=%(refname:short)", cwd=tmp / "origin.git").splitlines() \
     if (tmp / "origin.git").exists() else []
+check("... and the remote really holds the branch that was published",
+      "athena-demo" in pushed_refs, str(pushed_refs))
+
+# --- unapproved: nothing is sent, and the log says exactly that ---
+refs_before = sorted(pushed_refs)
+res2 = api.publish_app("demo.git")
+check("an unapproved publish still answers with its own job",
+      bool(res2.get("ok")) and bool(res2.get("job")) and res2.get("job") != res.get("job"),
+      str(res2))
+snap2 = {}
+for _ in range(240):
+    snap2 = json.loads(api.job_status(res2["job"]).body)
+    if snap2.get("state") in ("done", "failed"):
+        break
+    time.sleep(0.25)
+check("the unapproved job finishes without a push", snap2.get("state") == "done",
+      str(snap2)[:220])
+tail2 = str(snap2.get("tail"))
+check("nothing was sent, and the log says exactly that",
+      "Nothing was sent" in tail2 and "no approval gate is available here" in tail2,
+      tail2[-240:])
+result2 = snap2.get("result") or {}
+check("... and it reports no push rather than claiming one",
+      result2.get("pushed") is False, str(result2)[:220])
+check("... leaving the remote exactly where the approved push left it",
+      sorted(git("for-each-ref", "--format=%(refname:short)",
+                 cwd=tmp / "origin.git").splitlines()) == refs_before,
+      str(refs_before))
 api._store_info = real_store_info
 
 print("\n-- the README rule still holds --")

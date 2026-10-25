@@ -15,9 +15,10 @@ title: Athena
 description: >-
   The local AI-app store for Hermes: browse a constantly growing catalogue of apps,
   install an app from any git repository, launch it, read its logs and stop it. It
-  needs no API key and no account of its own, because it reuses the credentials
-  Hermes already holds. Apps run on your machine on loopback; the panel and the CLI
-  are two doors into the same engine. Agent control is in active development.
+  needs no API key and no account of its own: when an app needs a token, Athena
+  asks you once and then hands over the credential Hermes already holds. Apps run
+  on your machine on loopback; the panel and the CLI are two doors into the same
+  engine. Agent control is in active development.
 maintainer: athenaforhermes
 tier: community
 category: platform
@@ -68,6 +69,6 @@ capabilities:
     - athena_schedule
     - athena_build_app
     - athena_machines
-  provides_hooks: []
+  provides_hooks: [pre_tool_call]
   provides_middleware: []
   requires_env: []

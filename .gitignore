@@ -1,10 +1,24 @@
+# Python
 __pycache__/
-*.pyc
-.pytest_cache/
-*.log
-runs/
-api/
-engine/node_modules/
-cache/
-outputs/
+*.py[cod]
+*.egg-info/
+
+# Settings are per-machine and live in Athena's home, not in the repository.
+# The plugin directory is read once as a legacy location; it is never written in
+# place here either way.
 settings.json
+
+# Scratch and generated output
+cache/
+artifacts/
+
+# The engine is installed, not vendored: what the repository carries is the
+# manifest and the lockfile (`engine/package.json`, `engine/package-lock.json`).
+# The tree npm builds from that lockfile is the engine's code, not ours, and it
+# is not committed — setup installs it, at the pinned version, after consent.
+engine/node_modules/
+
+# Editors and OSes
+.DS_Store
+Thumbs.db
+*.swp

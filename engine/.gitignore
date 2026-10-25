@@ -1,0 +1,4 @@
+# The engine is installed from npm at the version pinned in package.json and
+# locked by package-lock.json. Its tree is not ours to commit.
+node_modules/
+*.log

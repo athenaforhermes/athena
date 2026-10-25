@@ -255,21 +255,8 @@ except Exception:  # noqa: BLE001 - without it the credentials rows read as unav
     athena_credentials = None
 
 
-def _hermes_home() -> Path:
-    """Hermes' own home. Re-exported so nothing here has to know it moved."""
-    return athena_credentials.hermes_home()
-
-
 def _athena_home() -> Path:
     return athena_credentials.athena_home(engine)
-
-
-def _hermes_env() -> Dict[str, str]:
-    return athena_credentials.hermes_env(engine)
-
-
-def _pinokio_hf_tokens() -> List[Path]:
-    return athena_credentials.pinokio_hf_tokens()
 
 
 def pinokio_home() -> Optional[Path]:
@@ -282,6 +269,12 @@ def collect_credentials() -> Dict[str, Any]:
 
 def seed_credentials(target_home: Path) -> Dict[str, Any]:
     return athena_credentials.seed_credentials(engine, target_home)
+
+
+def _app_credential_env(app_id: str) -> Dict[str, str]:
+    """What this app has been given: asked for once, remembered, empty when nobody was
+    asked. Fail-closed lives in `engine.credentials_for_app`; this is only the manager."""
+    return athena_engine.credentials_for_app(app_id, engine)
 
 
 # ---------------------------------------------------------------- models
@@ -329,10 +322,8 @@ class ImportIn(BaseModel):
 def status() -> JSONResponse:
     """Engine liveness, and nothing else.
 
-    This used to fold in a credentials summary, which made a route the status
-    chip polls every 8 seconds spawn `gh` and `hf` (a Python CLI — ~700ms
-    together) to compute a payload nothing read. The Settings tab has its own
-    /credentials route; that is where the answer belongs.
+    Nothing here spawns a CLI: a route the status chip polls every 8 seconds must not
+    pay ~700ms to answer. Credentials have their own route, under Settings.
     """
     _maybe_autostart()
     payload = engine.status()
@@ -356,6 +347,17 @@ def engine_stop() -> JSONResponse:
 def engine_restart() -> JSONResponse:
     engine.stop()
     return JSONResponse(engine.start())
+
+
+@router.post("/engine/setup")
+def engine_setup(consent: bool = False) -> JSONResponse:
+    """What the engine needs — and, with `?consent=true`, fetch it from npm.
+
+    `setup_state` names the facts; the fetch runs in the background. With no consent
+    `engine.setup()` downloads nothing at all, so that is a property of the call.
+    """
+    out = engine.setup(consent=consent)
+    return JSONResponse(out, status_code=200 if out.get("ok") else 409)
 
 
 # ---------------------------------------------------------------- apps
@@ -751,12 +753,12 @@ _update_cache: Dict[str, "tuple[float, Dict[str, Any]]"] = {}
 
 
 def _git_at(folder: Path, args: List[str], timeout: float = 90.0):
-    """Run git inside an app. Same non-interactive environment the engine uses,
-    so a repository that wants credentials fails instead of prompting."""
+    """Run git inside an app, on the engine's own allowlist — a repository is code from
+    somewhere else, and `git fetch` in it runs hooks and filters that repository ships."""
     return subprocess.run(
         ["git", "-C", folder.as_posix(), *args],
         capture_output=True, text=True, timeout=timeout,
-        env={**os.environ, **NON_INTERACTIVE_GIT_ENV},
+        env=athena_engine.child_env(NON_INTERACTIVE_GIT_ENV),
     )
 
 
@@ -1745,20 +1747,17 @@ def _hf_cli(home: Path) -> Optional[Path]:
     return Path(found) if found else None
 
 
-def _hf_token_value() -> str:
-    """The HuggingFace token Athena already holds, or "".
+def _hf_token_value(app_id: str = "") -> str:
+    """The HuggingFace token a pull may use, or "".
 
-    A secret that is only ever handed to a child process: it is never logged,
-    never put in a job result, and never returned by a route.
+    A secret handed only to a child process: never logged, never in a job result,
+    never returned by a route, and never read from `cache/HF_AUTH/token` — nothing
+    writes that file any more. With an app named it is the one *that app* was given,
+    asked for once through Hermes' gate; an app nobody has said yes for — or one with
+    no gate to ask — gets "" and downloads what it can anonymously.
     """
-    try:
-        f = _athena_home() / "cache" / "HF_AUTH" / "token"
-        if f.is_file():
-            val = f.read_text(encoding="utf-8").strip()
-            if val:
-                return val
-    except Exception:  # noqa: BLE001
-        pass
+    if app_id:
+        return _app_credential_env(app_id).get("HF_TOKEN", "")
     try:
         return str((collect_credentials().get("huggingface") or {}).get("token") or "")
     except Exception:  # noqa: BLE001
@@ -1926,11 +1925,15 @@ def _pull_run(job: Dict[str, Any]) -> Dict[str, Any]:
     jid = job["jid"]
     repo, include, revision = job["repo"], job.get("include"), job.get("revision")
     dest: Optional[Path] = job.get("dest")
-    env = {**os.environ, "HF_HOME": str(home / "cache" / "HF_HOME"),
-           # The CLI draws its bar with carriage returns, which arrive as one
-           # enormous line and say nothing a job log can show. The bytes on disk
-           # are the progress instead, and they are the number that matters.
-           "HF_HUB_DISABLE_PROGRESS_BARS": "1"}
+    # This child gets *this app's* granted token (below) and nothing else that is
+    # credential-shaped: an ambient HF_TOKEN in Athena's own process is not this
+    # app's to spend, and an app nobody has said yes for downloads anonymously.
+    # The CLI draws its bar with carriage returns, which arrive as one enormous line
+    # and say nothing a job log can show; the bytes on disk are the progress instead.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")}
+    env["HF_HOME"] = str(home / "cache" / "HF_HOME")
+    env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     if job.get("token"):
         env["HF_TOKEN"] = env["HUGGING_FACE_HUB_TOKEN"] = str(job["token"])
     cmd = [str(cli), "download", repo]
@@ -2065,26 +2068,26 @@ def _pull_enqueue(job: Dict[str, Any]) -> None:
 
 
 def _app_folder_for(app_id: str) -> Optional[Path]:
-    """The folder an app id names, or None. Both spellings are real folders.
-
-    Kept as a name because callers use it, and it is now the *same* resolver as `_app_folder`
-    rather than a second one that agreed on most inputs. Two functions answering "which folder
-    is this app" is one function too many.
-    """
+    """The folder an app id names, or None. One resolver, under its older name."""
     return _app_folder(app_id)
 
 
-def _publish_worker(jid: str, app_id: str, store: Dict[str, Any]) -> Dict[str, Any]:
+def _publish_worker(jid: str, app_id: str, store: Dict[str, Any],
+                    approve: bool = False) -> Dict[str, Any]:
     """Clone or fetch the store, rebuild every branch from this machine, push."""
     mod = _publish_module()
     checkout = Path(store["checkout"])
     line = lambda text: _job_add(jid, str(text))  # noqa: E731
     _job_add(jid, f"Store: {store['repo']}")
     _job_add(jid, f"Checkout: {checkout}")
+    # Approved to force-push the store? The caller's yes, or the person's, right here.
+    asked = {"approved": True, "message": ""} if approve else athena_engine.ask_approval(
+        "athena_publish", f"force-push every branch of {store['repo']} for {app_id} "
+        "(publishing rebuilds each branch from scratch)", "athena:publish")
     try:
         mod.ensure_checkout(checkout, store["clone"], store["token"], progress=line)
         res = mod.publish(home=_athena_home(), out=checkout, repo=store["repo"],
-                          push=True, token=store["token"], progress=line)
+                          push=asked["approved"], token=store["token"], progress=line)
     except Exception as e:  # noqa: BLE001
         _job_add(jid, f"!! {e}")
         return {"ok": False, "error": str(e), "app": app_id}
@@ -2092,17 +2095,22 @@ def _publish_worker(jid: str, app_id: str, store: Dict[str, Any]) -> Dict[str, A
     for name in res.get("branches") or []:
         if name.endswith(app_id) or app_id.startswith(name):
             branch = name
-    _job_add(jid, f"Pushed {len(res.get('branches') or [])} branches to {store['repo']}")
-    return {**res, "app": app_id, "branch": branch or "",
+    if asked["approved"]:
+        _job_add(jid, f"Pushed {len(res.get('branches') or [])} branches to {store['repo']}")
+    else:
+        _job_add(jid, "Nothing was sent: publishing rewrites every branch of the store, "
+                      f"so the push is a force-push. {asked['message']}".strip())
+    return {**res, "app": app_id, "branch": branch or "", "pushed": bool(asked["approved"]),
             "store": f"https://github.com/{store['repo']}"}
 
 
-def publish_app(app_id: str) -> Dict[str, Any]:
+def publish_app(app_id: str, approve: bool = False) -> Dict[str, Any]:
     """Publish this machine's apps to the store, from one app's card.
 
-    The route and the agent tool both land here. It answers with a job rather
-    than a result: a publish clones or fetches, rewrites every branch and pushes
-    to GitHub, and none of that belongs in a request the UI is waiting on.
+    Answers with a job, not a result: a publish clones or fetches, rewrites every
+    branch, and pushes. Pushing *rewrites* those branches, so it is a force-push and
+    needs approval for this call — `approve=True` from a caller that has just asked,
+    or the human gate `engine.ask_approval` asks inside the job.
     """
     folder = _app_folder_for(app_id)
     if folder is None:
@@ -2119,7 +2127,7 @@ def publish_app(app_id: str) -> Dict[str, Any]:
     if _job_running("publish"):
         return {"ok": False, "app": app_id, "error": "a publish is already running"}
     jid = _job_spawn("publish", f"Publishing {app_id} to {store['repo']}",
-                     lambda j: _publish_worker(j, app_id, store))
+                     lambda j: _publish_worker(j, app_id, store, approve))
     return {"ok": True, "app": app_id, "job": jid, "repo": store["repo"],
             "store": f"https://github.com/{store['repo']}",
             "branch": _publish_module().slug_for(folder.name),
@@ -2128,9 +2136,13 @@ def publish_app(app_id: str) -> Dict[str, Any]:
 
 
 @router.post("/apps/{app_id}/publish")
-def app_publish(app_id: str) -> JSONResponse:
-    """Put this app (and the store's index) on GitHub, from the app's card."""
-    out = publish_app(app_id)
+def app_publish(app_id: str, approve: bool = False) -> JSONResponse:
+    """Put this app (and the store's index) on GitHub, from the app's card.
+
+    `?approve=true` says the person has just approved this push; without it the job
+    still builds the store and asks the human gate before sending anything.
+    """
+    out = publish_app(app_id, approve=approve)
     return JSONResponse(out, status_code=200 if out.get("ok") else 409)
 
 @router.post("/apps/{app_id}/smoke")
@@ -2604,11 +2616,13 @@ def _held_providers() -> List[str]:
     lookup, and the answer it gives is deliberately the pessimistic one — a
     provider we cannot confirm is reported as *not* held, so a card only ever
     claims a credential we can point at.
+
+    Hermes' own credentials come from `collect_credentials`, not from opening
+    `auth.json`; `cache/HF_AUTH/token` is gone from here too — nothing writes it.
     """
     held: List[str] = []
     try:
-        if (_athena_home() / "cache" / "HF_AUTH" / "token").is_file():
-            held.append("huggingface")
+        held.extend(str(prov).lower() for prov in collect_credentials())
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -2618,16 +2632,7 @@ def _held_providers() -> List[str]:
     except Exception:  # noqa: BLE001
         pass
     try:
-        auth = json.loads((_hermes_home() / "auth.json").read_text(encoding="utf-8"))
-        for prov in (auth.get("credential_pool") or {}):
-            held.append(str(prov).lower())
-        for prov in (auth.get("providers") or {}):
-            held.append(str(prov).lower())
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        gh = _athena_home() / "credentials" / "github.json"
-        if gh.is_file() or (Path.home() / ".config" / "gh" / "hosts.yml").is_file():
+        if (Path.home() / ".config" / "gh" / "hosts.yml").is_file():
             held.append("github")
     except Exception:  # noqa: BLE001
         pass
@@ -2845,7 +2850,8 @@ def models_download(body: PullBody) -> JSONResponse:
     jid = _job_new("download", f"Downloading {info['repo']}")
     _pull_enqueue({"jid": jid, "repo": info["repo"], "include": body.include,
                    "revision": body.revision, "dest": dest.get("dest"),
-                   "token": _hf_token_value(),
+                   "app": body.app or "",
+                   "token": _hf_token_value(body.app or ""),
                    "total": sum(f["bytes"] for f in take)})
     return JSONResponse({
         "ok": True, "job": jid, "repo": info["repo"], "dest": dest.get("dest").as_posix()
@@ -3756,17 +3762,13 @@ def clone_app(repo_url: str, home: Path, timeout: int = 1800,
               ref: Optional[str] = None, name: Optional[str] = None) -> Dict[str, Any]:
     """Bring a repository into Athena's own app folder, the engine's way.
 
-    Installing an app is, at bottom, putting its repository where the engine
-    looks for apps: `<home>/api/<name>.git/` containing a launcher (`athena.js`, or
-    the legacy filename an older app still carries). We clone
-    ourselves so the credentials Hermes already holds (the `gh` token and the
-    shared gitconfig) reach private and gated repositories too, and so a failure
-    is reported as a failed clone rather than as a mysterious engine error.
+    Installing an app is, at bottom, putting its repository where the engine looks
+    for apps: `<home>/api/<name>.git/` containing a launcher. We clone ourselves so the
+    credentials Hermes already holds reach private and gated repositories too, and so a
+    failure is reported as a failed clone rather than as a mysterious engine error.
 
-    The clone matches the engine's exactly: `git clone <url> <name>` run from
-    the api folder, no `--depth` and no `--single-branch`. That is deliberate —
-    several apps' update and reset scripts walk tags and history, and a shallow
-    clone installs fine and then breaks on first update.
+    No `--depth`: several apps' update scripts walk tags and history, and a shallow
+    clone installs fine and then breaks on the first update.
     """
     name = name or app_folder_name(repo_url)
     dest = Path(home) / "api" / name
@@ -3775,15 +3777,15 @@ def clone_app(repo_url: str, home: Path, timeout: int = 1800,
                 "ref": ref}
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
-    # Inherit whatever git/GitHub credential Hermes already has.
-    try:
-        env.update(_hermes_env())
-    except Exception:  # noqa: BLE001
-        pass
-    # The engine pins these so a private repo or a credential helper fails
-    # outright instead of blocking on a password prompt nobody can see.
-    env.update(NON_INTERACTIVE_GIT_ENV)
+    # git's environment, from an allowlist rather than copied from this process. A
+    # clone carries a repository's hooks and a checkout of an installed app runs them,
+    # so the child gets the machine's settings (PATH, temp, proxy, CA bundle) and the
+    # credentials *this app* was given — asked for once, here at install, and
+    # remembered per app. An app nobody has said yes for gets none, and clones what
+    # is public. The engine pins these so a private repo or a credential helper
+    # fails outright instead of blocking on a password prompt nobody can see.
+    env = athena_engine.child_env({**NON_INTERACTIVE_GIT_ENV,
+                                   **_app_credential_env(name)})
 
     url = repo_url.rstrip("/")
     if not url.endswith(".git"):
@@ -3794,10 +3796,14 @@ def clone_app(repo_url: str, home: Path, timeout: int = 1800,
     # every one of them to install one. `--single-branch` takes just this app's
     # line of history: still a full clone of that branch, so the app's own
     # `git pull` still works, but nothing else comes along.
+    #
+    # `--` before the URL because the URL is data: one that starts with a dash is an
+    # option to git otherwise (`--upload-pack=...` reads a URL as a command to run),
+    # and this URL comes from a repository's own metadata.
     args = ["git", "clone"]
     if ref:
         args += ["--branch", ref, "--single-branch"]
-    args += [url, name]
+    args += ["--", url, name]
 
     # Relative destination, run from the api folder — the engine's own command.
     proc = subprocess.run(
@@ -5370,8 +5376,12 @@ class MachineHost:
                 raise RuntimeError(f"the image this machine points at is not there: {rootfs}")
             _job_add(jid, f"using the image already on disk: {rootfs}")
         elif url:
-            name = url.rstrip("/").split("/")[-1] or "rootfs.tar.gz"
-            rootfs = mdir / "image" / name
+            # An image becomes the system this machine boots: it comes over TLS or it
+            # does not come, and its local name is *derived* — never taken — from the URL.
+            problem = m.image_url_problem(url)
+            if problem:
+                raise RuntimeError(problem)
+            rootfs = mdir / "image" / m.image_filename(url, "rootfs.tar.gz")
             if rootfs.is_file() and rootfs.stat().st_size > 64 * 1024 * 1024:
                 _job_add(jid, f"image already fetched ({rootfs.stat().st_size // (1 << 20)} MB), "
                               f"not fetching it twice")
@@ -5393,7 +5403,14 @@ class MachineHost:
         return {"distro": spec.distro, "rootfs": str(rootfs), **boot}
 
     def _fetch(self, url: str, dest: Path, jid: str) -> None:
-        """Download an image with progress, because it is hundreds of megabytes."""
+        """Download an image with progress, because it is hundreds of megabytes.
+
+        This is the door as well as the route that calls it: an image comes over TLS
+        or not at all (`image_url_problem`), and `urlopen` would happily read `file://`.
+        """
+        problem = self._m().image_url_problem(url)
+        if problem:
+            raise RuntimeError(problem)
         dest.parent.mkdir(parents=True, exist_ok=True)
         part = dest.with_suffix(dest.suffix + ".part")
         req = Request(url, headers={"User-Agent": "athena"})
@@ -5509,7 +5526,8 @@ class MachineHost:
         if self.state(spec) == "missing":
             return {"ok": False, "error": f"{name} has no distro yet — start it first",
                     "needs_setup": m.wsl_needs_setup(spec)}
-        res = m.wsl_exec(spec.distro, command, user=user, cwd=cwd, timeout=max(1, min(3600, int(timeout))))
+        res = m.wsl_exec(spec.distro, command, user=user, cwd=cwd, timeout=max(1, min(3600, int(timeout))),
+                         owned=not spec.attach)
         self._remember(name, "ran a command", command=command, ok=bool(res.get("ok")))
         return res
 
@@ -6367,7 +6385,7 @@ def _git_out(cwd: Path, *args: str) -> Optional[str]:
     try:
         p = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
                            text=True, timeout=300,
-                           env={**os.environ, **NON_INTERACTIVE_GIT_ENV})
+                           env=athena_engine.child_env(NON_INTERACTIVE_GIT_ENV))
     except (OSError, subprocess.TimeoutExpired):
         return None
     return p.stdout if p.returncode == 0 else None
@@ -7480,54 +7498,29 @@ def shared_unify() -> JSONResponse:
     return JSONResponse({"ok": True, "job": jid})
 
 
-# ---------------------------------------------------------------- settings
-
-
 # ---------------------------------------------------------------- schedules
-# An app that should run again tomorrow does not need a model to say so. The
-# schedule is Hermes' own cron, driven by a script that calls the app directly —
-# no agent turn, so a daily run costs nothing but the electricity, and a run that
-# needs nobody to think should not wake anybody up.
+# An app that should run again tomorrow does not need a model to say so: the schedule
+# is Hermes' own cron, driven by a script that calls the app directly — no agent turn,
+# so a daily run costs the electricity and nothing else, and it wakes nobody up.
 
 
 _CRON: Any = None
-_SCHEDULE_SCRIPT_NAME = "athena-run.py"
 
 
-def _cron_jobs():
-    """Hermes' own cron store, loaded once. None where this build has none.
+def _cron_jobs() -> Optional[Any]:
+    """Hermes' own cron, through Hermes' own command line. None where there is none.
 
-    Cached the way the other optional modules are, and remembered as missing
-    rather than retried: a build without a cron store must say so once, not
-    discover it again on every request.
+    It used to `import cron.jobs` and walk `sys.path` for it — a plugin reaching into
+    another package's private module. `engine.HermesCron` drives `hermes cron
+    create/list/remove` instead.
     """
     global _CRON
-    if _CRON is not None:
-        return _CRON or None
-    try:
-        import cron.jobs as cj
-        _CRON = cj
-        return cj
-    except Exception:  # noqa: BLE001
-        pass
-    # Hermes' own store lives beside the executable that is running this plugin,
-    # which is not always on `sys.path` — a plugin is loaded by path. Find it the
-    # one way that does not depend on how the harness imported anything: the
-    # interpreter's own location (`<hermes-agent>/venv/Scripts/python.exe`).
-    for start in (Path(sys.executable).resolve(), _DASH_DIR.resolve()):
-        for up in (start, *start.parents):
-            cand = up / "cron" / "jobs.py"
-            if cand.is_file():
-                try:
-                    if str(up) not in sys.path:
-                        sys.path.insert(0, str(up))
-                    import cron.jobs as cj2
-                    _CRON = cj2
-                    return cj2
-                except Exception:  # noqa: BLE001
-                    continue
-    _CRON = False
-    return None
+    if _CRON is None:
+        try:
+            _CRON = athena_engine.HermesCron()
+        except Exception:  # noqa: BLE001
+            _CRON = False
+    return _CRON or None
 
 
 def _schedules_dir() -> Path:
@@ -7708,9 +7701,8 @@ def _schedule_script(app_id: str, capability: str, inputs: List[Any],
 class ScheduleBody(BaseModel):
     """A repeat: which capability, with what, and how often.
 
-    `schedule` is Hermes' own cron syntax — "every day at 8am", "0 7 * * 1" — and
-    it is the same parser that will fire the job, so a schedule Hermes cannot
-    read is refused here with Hermes' own words rather than stored and never run.
+    `schedule` is Hermes' own cron syntax, read by the same parser that will fire the
+    job, so a phrase Hermes cannot read is refused here in Hermes' own words.
     """
     capability: Optional[str] = None
     inputs: Optional[List[Any]] = None
@@ -7722,7 +7714,15 @@ class ScheduleBody(BaseModel):
 
 @router.post("/apps/{app_id}/schedule")
 def app_schedule(app_id: str, body: ScheduleBody) -> JSONResponse:
-    """Arrange for one of an app's capabilities to run again, on its own."""
+    """Arrange for one of an app's capabilities to run again, on its own.
+
+    Refused inside a scheduled run unless `cron.allow_agent_scheduling` is on: a run
+    that arranges more runs multiplies.
+    """
+    blocked = athena_engine.scheduling_blocked()
+    if blocked:
+        return JSONResponse({"ok": False, "app": app_id, "error": blocked},
+                            status_code=403)
     err, status, ctx = _planned_call(app_id, (body.capability or ""),
                                      body.inputs, body.then)
     if err:

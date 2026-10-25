@@ -233,14 +233,21 @@ def _refused(path, write=True):
     return None, ""
 
 
-# The scope includes the person's own folder -- which contains `.ssh`. Scope alone would hand
-# a private key over, so the same floor has to ask what a path *is*, not only where it lives.
+# The write scope is Athena's own home (store review, item 5): the person's ordinary folder is
+# no longer a write root, so an everyday document in it is refused the same way any path outside
+# the scope is — and the refusal says so, in the scope's own words. The floor still asks what a
+# path *is* as well as where it lives, which is what keeps a private key refused for being a
+# private key even though `~/.ssh` is perfectly readable.
 _code, _why = _refused(str(Path.home() / ".ssh" / "id_rsa"))
-check("a private key in your own folder is refused by the floor", _code == 403, f"{_code} {_why}")
+check("a private key is refused by the floor however the scope reads", _code == 403,
+      f"{_code} {_why}")
 check("... and the refusal names both the store and what it is",
       ".ssh" in str(_why) and "credential" in str(_why), str(_why))
-_code2, _ = _refused(str(Path.home() / "notes-from-tala.txt"))
-check("... while an ordinary document in the same folder is allowed", _code2 is None, str(_code2))
+_code2, _why2 = _refused(str(Path.home() / "notes-from-tala.txt"))
+check("... while an ordinary document outside Athena's home is refused as out of scope",
+      _code2 == 403, f"{_code2} {_why2}")
+check("... and that refusal is the scope's own, worded as Athena's",
+      api.athena_files.REFUSED in str(_why2), str(_why2)[:240])
 _code3, _why3 = _refused(str(HERMES_ROOT / "config.yaml"), write=False)
 check("... and Hermes's own settings file is refused even though Athena lives inside that tree",
       _code3 == 403, f"{_code3} {_why3}")

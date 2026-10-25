@@ -1,0 +1,554 @@
+# Third-party software
+
+Athena's own code is MIT (see `LICENSE`). It also redistributes a vendored engine,
+and this file is the licence inventory for it: every installed package under
+`engine/node_modules`, read from each package's own `package.json` at the time of
+writing — not from a guess about what a name usually is.
+
+501 packages, all under permissive licences:
+
+| Licence | Packages |
+| --- | --- |
+| MIT | 397 |
+| ISC | 48 |
+| BSD-3-Clause | 17 |
+| Apache-2.0 | 12 |
+| BSD-2-Clause | 8 |
+| BlueOak-1.0.0 | 5 |
+| Unlicense | 3 |
+| (BSD-2-Clause OR MIT OR Apache-2.0) | 1 |
+| (MIT AND BSD-3-Clause) | 1 |
+| (MIT AND Zlib) | 1 |
+| (MIT OR CC0-1.0) | 1 |
+| (MIT OR WTFPL) | 1 |
+| (WTFPL OR MIT) | 1 |
+| 0BSD | 1 |
+| MIT-0 | 1 |
+| WTFPL | 1 |
+| WTFPL OR ISC | 1 |
+| see package | 1 |
+
+The tree also holds 1 `package.json` in example directories (`github-from-package/example`) that are files shipped inside other packages rather than installed dependencies, and they are left out of the count.
+
+Exactly one package declares no licence field at all — `copy-paste@2.2.0` — so they are named here rather than counted as "MIT, probably".
+
+## The engine itself
+
+`engine/` boots [pinokiod](https://www.npmjs.com/package/pinokiod) 8.2.0, the
+daemon behind [Pinokio](https://pinokio.computer), as a plain Node process.
+`pinokiod` is MIT per its npm metadata; the published package ships no licence file
+of its own, so there is none to reproduce beyond this notice. It is vendored
+unmodified: `engine/boot.js` sets the environment the daemon reads (its config
+store, its port, its bind address) and writes nothing back into the package.
+
+The rest of the tree is its transitive dependencies — build tooling, HTTP and
+filesystem helpers, and native addons. In particular:
+
+- `node-pty` and `better-sqlite3` are the native addons that pin Athena to Node
+  22–24; they ship prebuilt binaries rather than compiling on install.
+- Packages under Apache-2.0 keep their own `LICENSE` and, where the package ships
+  one, its `NOTICE` file, inside their own directory.
+
+## Full list
+
+- `rc@1.2.8` — (BSD-2-Clause OR MIT OR Apache-2.0)
+- `sha.js@2.4.12` — (MIT AND BSD-3-Clause)
+- `pako@1.0.11` — (MIT AND Zlib)
+- `type-fest@2.19.0` — (MIT OR CC0-1.0)
+- `expand-template@2.0.3` — (MIT OR WTFPL)
+- `utf8-byte-length@1.0.5` — (WTFPL OR MIT)
+- `tslib@2.8.1` — 0BSD
+- `clean-git-ref@2.0.1` — Apache-2.0
+- `crc-32@1.2.2` — Apache-2.0
+- `detect-libc@1.0.3` — Apache-2.0
+- `detect-libc@2.1.2` — Apache-2.0
+- `ejs@3.1.10` — Apache-2.0
+- `fake-useragent@1.0.1` — Apache-2.0
+- `filelist@1.0.6` — Apache-2.0
+- `jake@10.9.4` — Apache-2.0
+- `rxjs@7.8.2` — Apache-2.0
+- `tunnel-agent@0.6.0` — Apache-2.0
+- `twitter-api-v2@1.29.1` — Apache-2.0
+- `xml-name-validator@5.0.0` — Apache-2.0
+- `dotenv@16.6.1` — BSD-2-Clause
+- `entities@6.0.1` — BSD-2-Clause
+- `escodegen@2.1.0` — BSD-2-Clause
+- `esprima@4.0.1` — BSD-2-Clause
+- `estraverse@5.3.0` — BSD-2-Clause
+- `esutils@2.0.3` — BSD-2-Clause
+- `webidl-conversions@7.0.0` — BSD-2-Clause
+- `webidl-conversions@3.0.1` — BSD-2-Clause
+- `@hapi/hoek@9.3.0` — BSD-3-Clause
+- `@hapi/topo@5.1.0` — BSD-3-Clause
+- `@sideway/address@4.1.5` — BSD-3-Clause
+- `@sideway/formula@3.0.1` — BSD-3-Clause
+- `@sideway/pinpoint@2.0.0` — BSD-3-Clause
+- `cpr@3.0.1` — BSD-3-Clause
+- `diff@8.0.4` — BSD-3-Clause
+- `fast-printf@1.6.10` — BSD-3-Clause
+- `flat@5.0.2` — BSD-3-Clause
+- `http-terminator@3.2.0` — BSD-3-Clause
+- `ieee754@1.2.1` — BSD-3-Clause
+- `joi@17.13.8` — BSD-3-Clause
+- `qs@6.16.0` — BSD-3-Clause
+- `roarr@7.21.7` — BSD-3-Clause
+- `source-map@0.6.1` — BSD-3-Clause
+- `sprintf-js@1.0.3` — BSD-3-Clause
+- `tough-cookie@4.1.4` — BSD-3-Clause
+- `isexe@3.1.5` — BlueOak-1.0.0
+- `jackspeak@3.4.3` — BlueOak-1.0.0
+- `minipass@7.1.3` — BlueOak-1.0.0
+- `package-json-from-dist@1.0.1` — BlueOak-1.0.0
+- `path-scurry@1.11.1` — BlueOak-1.0.0
+- `@isaacs/cliui@8.0.2` — ISC
+- `chownr@1.1.4` — ISC
+- `cliui@6.0.0` — ISC
+- `fastq@1.20.3` — ISC
+- `foreground-child@3.3.1` — ISC
+- `fs.realpath@1.0.0` — ISC
+- `get-caller-file@2.0.5` — ISC
+- `glob@10.5.0` — ISC
+- `glob@7.2.3` — ISC
+- `graceful-fs@4.2.11` — ISC
+- `https@1.0.0` — ISC
+- `inflight@1.0.6` — ISC
+- `inherits@2.0.4` — ISC
+- `ini@5.0.0` — ISC
+- `ini@1.3.8` — ISC
+- `isexe@2.0.0` — ISC
+- `jimini@0.0.8` — ISC
+- `json-stringify-safe@5.0.1` — ISC
+- `lru-cache@10.4.3` — ISC
+- `lru-cache@7.18.3` — ISC
+- `lru-cache@4.1.5` — ISC
+- `minimatch@9.0.9` — ISC
+- `minimatch@3.1.5` — ISC
+- `minimatch@5.1.9` — ISC
+- `node-gradio-client@0.14.6` — ISC
+- `once@1.4.0` — ISC
+- `pdrive@0.0.27` — ISC
+- `picocolors@1.1.1` — ISC
+- `pseudomap@1.0.2` — ISC
+- `require-main-filename@2.0.0` — ISC
+- `rimraf@5.0.10` — ISC
+- `rimraf@2.7.1` — ISC
+- `rimraf@3.0.2` — ISC
+- `saxes@6.0.0` — ISC
+- `semver@7.8.5` — ISC
+- `set-blocking@2.0.0` — ISC
+- `setprototypeof@1.2.0` — ISC
+- `signal-exit@4.1.0` — ISC
+- `signal-exit@3.0.7` — ISC
+- `which@5.0.0` — ISC
+- `which@2.0.2` — ISC
+- `which@1.3.1` — ISC
+- `which-module@2.0.1` — ISC
+- `wrappy@1.0.2` — ISC
+- `y18n@4.0.3` — ISC
+- `yallist@2.1.2` — ISC
+- `yaml@2.9.1` — ISC
+- `yargs-parser@18.1.3` — ISC
+- `7zip-bin@5.1.1` — MIT
+- `7zip-min-win-asar-support@1.4.4` — MIT
+- `@asamuzakjp/css-color@3.2.0` — MIT
+- `@csstools/css-calc@2.1.4` — MIT
+- `@csstools/css-color-parser@3.1.0` — MIT
+- `@csstools/css-parser-algorithms@3.0.5` — MIT
+- `@csstools/css-tokenizer@3.0.4` — MIT
+- `@eggjs/yauzl@2.11.0` — MIT
+- `@homebridge/node-pty-prebuilt-multiarch@0.12.0-beta.5` — MIT
+- `@koromix/koffi-win32-x64@3.3.3` — MIT
+- `@parcel/watcher@2.5.1` — MIT
+- `@parcel/watcher-win32-x64@2.5.1` — MIT
+- `@pkgjs/parseargs@0.11.0` — MIT
+- `@tootallnate/quickjs-emscripten@0.23.0` — MIT
+- `@types/http-proxy@1.17.17` — MIT
+- `@types/node@26.6.5` — MIT
+- `@xterm/headless@5.5.0` — MIT
+- `@zkochan/rimraf@2.1.3` — MIT
+- `abort-controller@3.0.0` — MIT
+- `accepts@1.3.8` — MIT
+- `agent-base@6.0.2` — MIT
+- `agent-base@7.1.4` — MIT
+- `ansi-regex@6.4.0` — MIT
+- `ansi-regex@5.0.1` — MIT
+- `ansi-regex@2.1.1` — MIT
+- `ansi-styles@6.2.3` — MIT
+- `ansi-styles@4.3.0` — MIT
+- `append-field@1.0.0` — MIT
+- `argparse@1.0.10` — MIT
+- `array-flatten@1.1.1` — MIT
+- `ast-types@0.13.4` — MIT
+- `async@3.2.6` — MIT
+- `async@2.6.4` — MIT
+- `async-lock@1.4.1` — MIT
+- `async-retry@1.3.3` — MIT
+- `asynckit@0.4.0` — MIT
+- `available-typed-arrays@1.0.7` — MIT
+- `axios@1.20.0` — MIT
+- `balanced-match@1.0.2` — MIT
+- `base64-js@1.5.1` — MIT
+- `basic-ftp@5.3.1` — MIT
+- `batch@0.6.1` — MIT
+- `better-path-resolve@1.0.0` — MIT
+- `better-sqlite3@12.11.1` — MIT
+- `bindings@1.5.0` — MIT
+- `bl@1.2.3` — MIT
+- `bl@4.1.0` — MIT
+- `body-parser@1.20.8` — MIT
+- `brace-expansion@2.1.7` — MIT
+- `brace-expansion@1.1.21` — MIT
+- `braces@3.0.3` — MIT
+- `buffer@6.0.3` — MIT
+- `buffer@5.7.1` — MIT
+- `buffer-alloc@1.2.0` — MIT
+- `buffer-alloc-unsafe@1.1.0` — MIT
+- `buffer-crc32@0.2.13` — MIT
+- `buffer-fill@1.0.0` — MIT
+- `buffer-from@1.1.2` — MIT
+- `bufferutil@4.1.0` — MIT
+- `busboy@1.6.0` — MIT
+- `bytes@3.1.2` — MIT
+- `call-bind@1.0.9` — MIT
+- `call-bind-apply-helpers@1.0.2` — MIT
+- `call-bound@1.0.4` — MIT
+- `callsites@3.1.0` — MIT
+- `camelcase@5.3.1` — MIT
+- `camelcase@6.3.0` — MIT
+- `clear-module@4.1.3` — MIT
+- `color-convert@2.0.1` — MIT
+- `color-name@1.1.4` — MIT
+- `combined-stream@1.0.8` — MIT
+- `commander@2.20.3` — MIT
+- `compressing@1.10.6` — MIT
+- `concat-map@0.0.1` — MIT
+- `concat-stream@1.6.2` — MIT
+- `content-disposition@0.5.4` — MIT
+- `content-type@1.0.5` — MIT
+- `cookie@0.7.2` — MIT
+- `cookie-parser@1.4.7` — MIT
+- `cookie-signature@1.0.6` — MIT
+- `cookie-signature@1.0.7` — MIT
+- `core-util-is@1.0.3` — MIT
+- `cors@2.8.6` — MIT
+- `cross-fetch@3.2.0` — MIT
+- `cross-fetch-polyfill@0.0.0` — MIT
+- `cross-spawn@7.0.6` — MIT
+- `cross-spawn@4.0.2` — MIT
+- `cssstyle@4.6.0` — MIT
+- `csv-parse@5.6.0` — MIT
+- `data-uri-to-buffer@6.0.2` — MIT
+- `data-urls@5.0.0` — MIT
+- `debug@2.6.9` — MIT
+- `debug@4.4.3` — MIT
+- `debug@3.2.7` — MIT
+- `decamelize@1.2.0` — MIT
+- `decamelize@4.0.0` — MIT
+- `decimal.js@10.6.0` — MIT
+- `decompress@4.2.1` — MIT
+- `decompress-response@6.0.0` — MIT
+- `decompress-tar@4.1.1` — MIT
+- `decompress-tarbz2@4.1.1` — MIT
+- `decompress-targz@4.1.1` — MIT
+- `decompress-unzip@4.0.1` — MIT
+- `deep-extend@0.6.0` — MIT
+- `default-shell@1.0.1` — MIT
+- `define-data-property@1.1.4` — MIT
+- `degenerator@5.0.1` — MIT
+- `delay@5.0.0` — MIT
+- `delayed-stream@1.0.0` — MIT
+- `depd@2.0.0` — MIT
+- `destroy@1.2.0` — MIT
+- `diff3@0.0.3` — MIT
+- `dijkstrajs@1.0.3` — MIT
+- `dunder-proto@1.0.1` — MIT
+- `eastasianwidth@0.2.0` — MIT
+- `ee-first@1.1.1` — MIT
+- `emoji-regex@9.2.2` — MIT
+- `emoji-regex@8.0.0` — MIT
+- `encodeurl@2.0.0` — MIT
+- `end-of-stream@1.4.5` — MIT
+- `eol@0.9.1` — MIT
+- `es-define-property@1.0.1` — MIT
+- `es-errors@1.3.0` — MIT
+- `es-object-atoms@1.1.2` — MIT
+- `es-set-tostringtag@2.1.0` — MIT
+- `es6-promise@4.2.8` — MIT
+- `escape-html@1.0.3` — MIT
+- `etag@1.8.1` — MIT
+- `event-target-shim@5.0.1` — MIT
+- `eventemitter3@4.0.7` — MIT
+- `events@3.3.0` — MIT
+- `eventsource@2.0.2` — MIT
+- `execa@0.5.1` — MIT
+- `express@4.22.3` — MIT
+- `express-http-proxy-cp@2.0.3` — MIT
+- `express-session@1.19.0` — MIT
+- `extend-shallow@2.0.1` — MIT
+- `fd-slicer@1.1.0` — MIT
+- `fd-slicer2@1.2.0` — MIT
+- `file-type@5.2.0` — MIT
+- `file-type@3.9.0` — MIT
+- `file-type@6.2.0` — MIT
+- `file-uri-to-path@1.0.0` — MIT
+- `fill-range@7.1.1` — MIT
+- `finalhandler@1.3.2` — MIT
+- `find-up@4.1.0` — MIT
+- `flushwritable@1.0.0` — MIT
+- `follow-redirects@1.16.1` — MIT
+- `for-each@0.3.5` — MIT
+- `form-data@4.0.6` — MIT
+- `forwarded@0.2.0` — MIT
+- `fresh@0.5.2` — MIT
+- `fs-constants@1.0.0` — MIT
+- `fs-extra@11.4.1` — MIT
+- `fs-extra@10.1.0` — MIT
+- `fs-move@6.0.0` — MIT
+- `function-bind@1.1.2` — MIT
+- `get-intrinsic@1.3.0` — MIT
+- `get-proto@1.0.1` — MIT
+- `get-ready@1.0.0` — MIT
+- `get-stream@2.3.1` — MIT
+- `get-uri@6.0.5` — MIT
+- `github-from-package@0.0.0` — MIT
+- `glob-gitignore@1.0.15` — MIT
+- `go-get-folder-size@0.5.5` — MIT
+- `gopd@1.2.0` — MIT
+- `gray-matter@4.0.3` — MIT
+- `growly@1.3.0` — MIT
+- `has-property-descriptors@1.0.2` — MIT
+- `has-symbols@1.1.0` — MIT
+- `has-tostringtag@1.0.2` — MIT
+- `hasown@2.0.4` — MIT
+- `html-encoding-sniffer@4.0.0` — MIT
+- `http-errors@2.0.1` — MIT
+- `http-proxy@1.18.1` — MIT
+- `http-proxy-agent@7.0.2` — MIT
+- `http-proxy-middleware@3.0.7` — MIT
+- `https-proxy-agent@5.0.1` — MIT
+- `https-proxy-agent@7.0.6` — MIT
+- `iconv-lite@0.5.2` — MIT
+- `iconv-lite@0.6.3` — MIT
+- `iconv-lite@0.4.24` — MIT
+- `ignore@5.3.2` — MIT
+- `ip-address@10.7.4` — MIT
+- `ipaddr.js@1.9.1` — MIT
+- `is-callable@1.2.7` — MIT
+- `is-docker@2.2.1` — MIT
+- `is-extendable@0.1.1` — MIT
+- `is-extglob@2.1.1` — MIT
+- `is-fullwidth-code-point@3.0.0` — MIT
+- `is-glob@4.0.3` — MIT
+- `is-natural-number@4.0.1` — MIT
+- `is-number@7.0.0` — MIT
+- `is-plain-obj@2.1.0` — MIT
+- `is-plain-object@5.1.0` — MIT
+- `is-potential-custom-element-name@1.0.1` — MIT
+- `is-stream@1.1.0` — MIT
+- `is-typed-array@1.1.15` — MIT
+- `is-windows@1.0.2` — MIT
+- `is-wsl@2.2.0` — MIT
+- `isarray@2.0.5` — MIT
+- `isarray@1.0.0` — MIT
+- `isbinaryfile@5.0.7` — MIT
+- `isomorphic-git@1.43.3` — MIT
+- `js-yaml@3.15.2` — MIT
+- `jsdom@24.1.3` — MIT
+- `jsonfile@6.2.1` — MIT
+- `key-store@1.2.0` — MIT
+- `kill-sync@1.0.4` — MIT
+- `kind-of@6.0.3` — MIT
+- `kleur@4.1.5` — MIT
+- `koffi@3.3.3` — MIT
+- `locate-path@5.0.0` — MIT
+- `lodash@4.18.1` — MIT
+- `make-array@1.0.5` — MIT
+- `make-dir@1.3.0` — MIT
+- `marked@5.1.2` — MIT
+- `math-intrinsics@1.1.0` — MIT
+- `media-typer@0.3.0` — MIT
+- `merge-descriptors@1.0.3` — MIT
+- `methods@1.1.2` — MIT
+- `micromatch@4.0.8` — MIT
+- `mime@1.6.0` — MIT
+- `mime-db@1.52.0` — MIT
+- `mime-types@2.1.35` — MIT
+- `mimic-response@3.1.0` — MIT
+- `minimist@1.2.8` — MIT
+- `minimisted@2.0.1` — MIT
+- `minisearch@7.2.0` — MIT
+- `mkdirp@0.5.6` — MIT
+- `mkdirp-classic@0.5.3` — MIT
+- `ms@2.0.0` — MIT
+- `ms@2.1.3` — MIT
+- `multer@1.4.5-lts.2` — MIT
+- `napi-build-utils@2.0.0` — MIT
+- `negotiator@0.6.3` — MIT
+- `netmask@2.1.1` — MIT
+- `node-abi@3.98.0` — MIT
+- `node-addon-api@7.1.1` — MIT
+- `node-downloader-helper@2.1.11` — MIT
+- `node-fetch@2.7.0` — MIT
+- `node-gyp-build@4.8.4` — MIT
+- `normalize-path@3.0.0` — MIT
+- `npm-run-path@2.0.2` — MIT
+- `nwsapi@2.2.28` — MIT
+- `object-assign@4.1.1` — MIT
+- `object-inspect@1.13.4` — MIT
+- `on-finished@2.4.1` — MIT
+- `on-headers@1.1.0` — MIT
+- `p-finally@1.0.0` — MIT
+- `p-limit@3.1.0` — MIT
+- `p-limit@2.3.0` — MIT
+- `p-locate@4.1.0` — MIT
+- `p-timeout@3.2.0` — MIT
+- `p-try@2.2.0` — MIT
+- `p-wait-for@3.2.0` — MIT
+- `pac-proxy-agent@7.2.0` — MIT
+- `pac-resolver@7.0.1` — MIT
+- `parent-module@2.0.0` — MIT
+- `parse5@7.3.0` — MIT
+- `parseurl@1.3.3` — MIT
+- `path-exists@4.0.0` — MIT
+- `path-is-absolute@1.0.1` — MIT
+- `path-key@3.1.1` — MIT
+- `path-key@2.0.1` — MIT
+- `path-to-regexp@0.1.13` — MIT
+- `pend@1.2.0` — MIT
+- `picomatch@2.3.2` — MIT
+- `pify@2.3.0` — MIT
+- `pify@3.0.0` — MIT
+- `pify@4.0.1` — MIT
+- `pinkie@2.0.4` — MIT
+- `pinkie-promise@2.0.1` — MIT
+- `pinokiod@8.2.0` — MIT
+- `pngjs@5.0.0` — MIT
+- `portfinder-cp@1.0.34` — MIT
+- `possible-typed-array-names@1.1.0` — MIT
+- `prebuild-install@7.1.3` — MIT
+- `process@0.11.10` — MIT
+- `process-nextick-args@2.0.1` — MIT
+- `proxy-addr@2.0.8` — MIT
+- `proxy-agent@6.5.0` — MIT
+- `proxy-from-env@2.1.0` — MIT
+- `proxy-from-env@1.1.0` — MIT
+- `psl@1.15.0` — MIT
+- `pump@3.0.4` — MIT
+- `punycode@2.3.1` — MIT
+- `qrcode@1.5.4` — MIT
+- `querystring@0.2.1` — MIT
+- `querystringify@2.2.0` — MIT
+- `random-bytes@1.0.0` — MIT
+- `random-seed@0.3.0` — MIT
+- `random-useragent@0.5.0` — MIT
+- `range-parser@1.2.1` — MIT
+- `raw-body@2.5.3` — MIT
+- `readable-stream@4.8.0` — MIT
+- `readable-stream@2.3.8` — MIT
+- `readable-stream@3.6.2` — MIT
+- `rename-overwrite@5.0.4` — MIT
+- `require-directory@2.1.1` — MIT
+- `requires-port@1.0.0` — MIT
+- `resolve-from@5.0.0` — MIT
+- `retry@0.13.1` — MIT
+- `reusify@1.1.0` — MIT
+- `rrweb-cssom@0.7.1` — MIT
+- `rrweb-cssom@0.8.0` — MIT
+- `safe-buffer@5.2.1` — MIT
+- `safe-buffer@5.1.2` — MIT
+- `safe-stable-stringify@2.5.0` — MIT
+- `safer-buffer@2.1.2` — MIT
+- `section-matter@1.0.0` — MIT
+- `seek-bzip@1.0.6` — MIT
+- `semiver@1.1.0` — MIT
+- `semver-compare@1.0.0` — MIT
+- `send@0.19.2` — MIT
+- `serve-static@1.16.3` — MIT
+- `set-function-length@1.2.2` — MIT
+- `shebang-command@2.0.0` — MIT
+- `shebang-regex@3.0.0` — MIT
+- `shell-env@0.3.0` — MIT
+- `shell-path@2.1.0` — MIT
+- `shellwords@0.1.1` — MIT
+- `side-channel@1.1.1` — MIT
+- `side-channel-list@1.0.1` — MIT
+- `side-channel-map@1.0.1` — MIT
+- `side-channel-weakmap@1.0.2` — MIT
+- `simple-concat@1.0.1` — MIT
+- `simple-get@4.0.1` — MIT
+- `smart-buffer@4.2.0` — MIT
+- `socks@2.8.10` — MIT
+- `socks-proxy-agent@8.0.5` — MIT
+- `statuses@2.0.2` — MIT
+- `std-env@3.10.0` — MIT
+- `streamifier@0.1.1` — MIT
+- `streamsearch@1.1.0` — MIT
+- `string-width@5.1.2` — MIT
+- `string-width@4.2.3` — MIT
+- `string_decoder@1.3.0` — MIT
+- `string_decoder@1.1.1` — MIT
+- `strip-ansi@7.2.0` — MIT
+- `strip-ansi@6.0.1` — MIT
+- `strip-ansi@3.0.1` — MIT
+- `strip-bom-string@1.0.0` — MIT
+- `strip-dirs@2.1.0` — MIT
+- `strip-eof@1.0.0` — MIT
+- `strip-json-comments@2.0.1` — MIT
+- `sudo-prompt-programfiles-x86@9.2.10` — MIT
+- `symbol-tree@3.2.4` — MIT
+- `symlink-dir@5.2.1` — MIT
+- `systeminformation@5.33.15` — MIT
+- `tar-fs@2.1.5` — MIT
+- `tar-stream@1.6.2` — MIT
+- `tar-stream@2.2.0` — MIT
+- `through@2.3.8` — MIT
+- `to-buffer@1.2.2` — MIT
+- `to-regex-range@5.0.1` — MIT
+- `toasted-notifier@10.1.0` — MIT
+- `toidentifier@1.0.1` — MIT
+- `tr46@5.1.1` — MIT
+- `tr46@0.0.3` — MIT
+- `type-is@1.6.18` — MIT
+- `typed-array-buffer@1.0.3` — MIT
+- `typedarray@0.0.6` — MIT
+- `uid-safe@2.1.5` — MIT
+- `unbzip2-stream@1.4.3` — MIT
+- `undici-types@8.9.0` — MIT
+- `universalify@2.0.1` — MIT
+- `universalify@0.2.0` — MIT
+- `unpipe@1.0.0` — MIT
+- `url-parse@1.5.10` — MIT
+- `util-deprecate@1.0.2` — MIT
+- `util.inherits@1.0.3` — MIT
+- `utils-merge@1.0.1` — MIT
+- `uuid@9.0.1` — MIT
+- `vary@1.1.2` — MIT
+- `w3c-xmlserializer@5.0.0` — MIT
+- `wait-on@7.2.0` — MIT
+- `whatwg-encoding@3.1.1` — MIT
+- `whatwg-mimetype@4.0.0` — MIT
+- `whatwg-url@14.2.0` — MIT
+- `whatwg-url@5.0.0` — MIT
+- `which-typed-array@1.1.24` — MIT
+- `wrap-ansi@8.1.0` — MIT
+- `wrap-ansi@7.0.0` — MIT
+- `wrap-ansi@6.2.0` — MIT
+- `ws@8.22.0` — MIT
+- `xmlchars@2.2.0` — MIT
+- `xtend@4.0.2` — MIT
+- `xterm@5.3.0` — MIT
+- `xterm-addon-fit@0.8.0` — MIT
+- `xterm-addon-serialize@0.9.0` — MIT
+- `xterm-headless@5.3.0` — MIT
+- `yargs@15.4.1` — MIT
+- `yargs-unparser-custom-flag@2.0.0` — MIT
+- `yauzl@2.10.0` — MIT
+- `yazl@2.5.1` — MIT
+- `yocto-queue@0.1.0` — MIT
+- `@csstools/color-helpers@5.1.0` — MIT-0
+- `fast-sha256@1.3.0` — Unlicense
+- `tweetnacl@1.0.3` — Unlicense
+- `tweetnacl-util@0.15.1` — Unlicense
+- `truncate-utf8-bytes@1.0.2` — WTFPL
+- `sanitize-filename@1.6.4` — WTFPL OR ISC
+- `copy-paste@2.2.0` — see package

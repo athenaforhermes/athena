@@ -126,7 +126,6 @@ EXPORTS = {
     "FolderPicker": "walking to the image folder instead of typing its path",
     "JobProgress": "the bar a job draws: bytes when there are bytes, a label when there are not",
     "MachineCard": "a machine's card: its chip, its verb, the console behind",
-    "rigBadge": "whether anyone has this app working on a box like this one",
     "rigMatch": "the store filter for apps checked in from Windows on NVIDIA",
     "RunsRow": "one recorded run",
     "AutoTerm": "the auto-following output box",

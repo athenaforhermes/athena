@@ -414,9 +414,12 @@ A path box is a folder somebody has to remember. `Change folder…` opens a brow
 `/machines/folders?path=<folder>` lists the **folders inside one folder** — never files, never a
 drive sweep, never a walk of its own — and the panel draws one level per click with `Up` (absent
 at a root), the drives as a way in, and `Use this folder` meaning *the folder you are standing in*,
-so nothing depends on what a text box says. Where the desktop app exposes a native folder dialog
-(`window.hermesDesktop.selectPaths`) it is offered as an extra door, but the browser is the path
-that always exists: a plugin cannot count on the host's picker. The typed path stays available
+so nothing depends on what a text box says. Where the host exposes a file dialog through the plugin
+SDK (`ctx.os.pickOpenPath`) it is offered as an extra door — but it is a **file** dialog:
+`PluginFileDialogOptions` carries `defaultPath`, `filters` and `title`, and no way to ask for a
+folder, so the path it answers with is the folder the chosen file lives in. The browser stays the
+way to pick *a folder*, because a plugin cannot count on the host having a picker at all — and no
+picker means no extra door, not a door that does nothing. The typed path stays available
 (`Type a path`) for a path already on the clipboard.
 
 Once a folder is set, the images inside it are read **recursively and shallowly**: `ISO_DEPTH = 3`

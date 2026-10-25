@@ -312,10 +312,11 @@ with tempfile.TemporaryDirectory() as tmp:
     # A fetched image is written onto the spec, or the next start fetches all over again in a
     # job -- which is what made a screen move land in the middle of one. The URL stays, because
     # a machine rebuilt from this spec on a machine with no network still finds the file beside
-    # it; what it gains is the path.
+    # it; what it gains is the path. It is an `https://` URL because that is the only scheme an
+    # image may be fetched over -- the guard for that is asserted just below.
     url_spec = machines.MachineSpec(name="iso", provider="qemu",
                                     image={"kind": "iso", "name": "tiny.iso",
-                                           "url": "http://example.invalid/tiny.iso"})
+                                           "url": "https://example.invalid/tiny.iso"})
     machines.machine_dir(home, url_spec.name).mkdir(parents=True, exist_ok=True)
     machines.save_spec(home, url_spec)
     folder = machines.machine_dir(home, url_spec.name)
@@ -334,10 +335,32 @@ with tempfile.TemporaryDirectory() as tmp:
           bool(reloaded.image.get("path")) and Path(reloaded.image["path"]).name == "tiny.iso",
           str(reloaded.image))
     check("... with the URL kept, for a machine rebuilt where there is no network",
-          reloaded.image.get("url") == "http://example.invalid/tiny.iso", str(reloaded.image))
+          reloaded.image.get("url") == "https://example.invalid/tiny.iso", str(reloaded.image))
     again = machines.qemu_prepare_image(reloaded, folder, fetch=None)
     check("... so nothing is fetched twice: a second prepare reuses the file with no fetcher",
           again.get("ok") is True and again.get("fetched") is False, str(again)[:160])
+
+    # An image becomes the system a machine boots, so it may only arrive over TLS. A non-https
+    # URL is refused *by name* before the fetcher is reached -- "the bytes were swapped in
+    # transit" is not something this machine can notice afterwards. The fetcher below records
+    # every call it is handed, so "refused" is proven by the fetcher never seeing the URL at
+    # all, not by the shape of the answer.
+    plain_spec = machines.MachineSpec(name="plain-iso", provider="qemu",
+                                      image={"kind": "iso", "name": "plain.iso",
+                                             "url": "http://example.invalid/plain.iso"})
+    plain_folder = machines.machine_dir(home, plain_spec.name)
+    plain_folder.mkdir(parents=True, exist_ok=True)
+    fetched_urls: list = []
+    refused = machines.qemu_prepare_image(plain_spec, plain_folder,
+                                          fetch=lambda url, dest: fetched_urls.append(url))
+    check("an http:// image URL is refused rather than fetched",
+          refused.get("ok") is False and refused.get("fetched") is not True, str(refused)[:200])
+    check("... and the fetcher is never called with it, so nothing came over the wire",
+          fetched_urls == [], str(fetched_urls))
+    check("... and the refusal says why: an image may only be fetched over https",
+          "https" in str(refused.get("error") or ""), str(refused.get("error"))[:200])
+    check("... and no image file was left beside the machine",
+          not (plain_folder / "image" / "plain.iso").exists())
 
     # And the guard is about jobs, not about machines: the state reading it sits next to still
     # answers honestly for a machine that never started.

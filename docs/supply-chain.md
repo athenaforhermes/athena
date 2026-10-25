@@ -32,32 +32,44 @@ the declaration, compares it against the packages the code actually imports, and
 drift in either direction — an import that was never declared, or a declaration nothing uses.
 That is the whole gate; there is no second list to forget to update.
 
-## 3. Node: a vendored engine
+## 3. Node: an engine that is pinned, not vendored
 
-The engine — the thing that actually runs an app — is `pinokiod` **8.2.0**, vendored with its
-`node_modules` under `engine/`, pinned in `engine/package.json` and locked by
-`engine/package-lock.json` (lockfileVersion 3).
+The engine — the thing that actually runs an app — is `pinokiod` at **one exact version**, the
+version written in `engine/package.json` and locked by `engine/package-lock.json` (lockfileVersion
+3), which pins that version *and* every transitive dependency of it by version and by integrity
+hash. There is no range and no floating tag.
 
-Vendored on purpose:
+The pin is the manifest and the lockfile. **The engine is not vendored**, and a published
+repository carries no engine code and no `node_modules` — setup installs the engine from npm, from
+that lockfile, at that version, and **only behind a consent step that names the version**. Nothing
+is fetched before you agree. Until that install has run once, an app cannot start; the panel says
+so instead of working around it.
 
-* an install that needs `npm` to work is an install that fails on a machine with no network, no
-  npm, or a proxy in the way;
-* the tree is reproducible from the lockfile, and the plugin ships what it tested;
-* 501 packages, all under permissive licences (MIT 397, ISC 48, BSD-3-Clause 17, and the rest),
-  inventoried in `THIRD-PARTY.md`.
+Why it is provisioned rather than shipped, stated as a trade rather than a win:
 
-`THIRD-PARTY.md` is **generated from each package's own `package.json` on disk** — not from a
-guess about what a name usually is. To regenerate after an engine change:
+* an install now needs the network and a working registry once, where a vendored tree needed
+  neither;
+* what that buys is a published repository that holds only Athena's own code, and an engine whose
+  every entry is checked against npm's own integrity hashes on the way in;
+* on a machine with no network, browsing the catalogue still works and running an app does not.
+
+The 501 packages are the same tree either way, all under permissive licences (MIT 397, ISC 48,
+BSD-3-Clause 17, and the rest). `THIRD-PARTY.md` is their inventory, **generated from each
+package's own `package.json` on disk** — from a local install of the lockfile, not from a guess
+about what a name usually is. To regenerate after an engine change:
 
 ```bash
+cd engine && npm ci              # the lockfile's tree, on disk — the consent step does this
 python tests/live/t_release.py --dump-third-party > THIRD-PARTY.md
 python tests/live/t_release.py
 ```
 
-The second command is the gate: it re-reads the inventory and fails if a licence group, a
+The second `python` command is the gate: it re-reads the inventory and fails if a licence group, a
 package name or the declared Python list disagrees with what is on disk. Comparing the licence
 lines exactly is not possible (npm's metadata moves), so the comparison is per licence group,
-name-sorted — a change that matters shows up, a reordering does not.
+name-sorted — a change that matters shows up, a reordering does not. It reads the tree, so it
+needs the install to have happened: a checkout with no `engine/node_modules` (which is what a
+clone of the repository is) cannot run this gate until it does.
 
 **Node itself is not vendored.** Athena finds the Node Hermes already downloaded
 (`_find_node`), or one you point it at with `ATHENA_NODE`. Supported: 22–24. 25+ is refused on
@@ -73,7 +85,9 @@ tripwire for the panel half; `t_release.py` is the tripwire for this half.
 
 Model weights are not shipped. If an app needs one, the app downloads it from Hugging Face under
 your own token (`<athena home>/cache/HF_AUTH/token`), and Athena's role is to *name* the token in
-a scan and never print its value. Nothing downloads at install time.
+a scan and never print its value. Installing an app downloads that app's repository — that is what
+a clone is — and nothing else. The one download *setup* performs is the engine itself, once, from
+npm, at the pinned version and behind a consent step (§3).
 
 ## 5. What Athena installs on your behalf
 

@@ -1561,44 +1561,33 @@ ok('  the sentence points at the app\'s own log rather than promising a retry',
    /log/.test(gone({ message: 'no such job' }, ''))
      && !/try again later|temporar/i.test(gone({ message: 'no such job' }, '')))
 
-// ---- is anyone running this on a box like mine ------------------------------
-// The catalogue declares no VRAM and no disk figure, so the only rig-fit facts a
-// store row carries are its check-ins: has somebody reported this app from
-// Windows, from an NVIDIA card. That is evidence of it working, not a promise
-// about speed — so the check here is mostly that the wording never drifts into
-// a requirement, and that the chip keeps exactly what the badge claims.
+// ---- no card advertises a platform ------------------------------------------
+// A store row used to carry a badge saying "runs on Windows", assembled from
+// other people's check-ins — so an app made for a Mac could wear it just because
+// a Windows user had once run it. On a card that reads as a requirement about the
+// app, which it never was. The badge is gone; the chip's filter stays, because
+// the chip is opt-in and its title says exactly what it counts.
 const RB = (over) => Object.assign({ checkins: 12, platforms: {}, gpus: {} }, over)
 const rigCases = [
   ['checked in from Windows + NVIDIA',
-   RB({ platforms: { windows: true, linux: true }, gpus: { nvidia: true } }),
-   'runs on Windows', 'run', true],
+   RB({ platforms: { windows: true, linux: true }, gpus: { nvidia: true } }), true],
   ['checked in from Windows only',
-   RB({ platforms: { windows: true }, gpus: { amd: true } }), 'Windows, no NVIDIA', '', false],
+   RB({ platforms: { windows: true }, gpus: { amd: true } }), false],
   ['checked in from mac only',
-   RB({ platforms: { mac: true }, gpus: { apple: true } }), 'no Windows check-in', 'need', false],
-  ['no check-ins at all', RB({ checkins: 0 }), 'nobody has run it', '', false],
-  ['check-ins but no maps', RB({ checkins: 9 }), 'nobody has run it', '', false],
+   RB({ platforms: { mac: true }, gpus: { apple: true } }), false],
+  ['no check-ins at all', RB({ checkins: 0 }), false],
 ]
-for (const [label, app, text, cls, keeps] of rigCases) {
-  const b = __fns.rigBadge(app)
-  ok(`  ${label}: the mark reads "${text}"`, b.text === text, `${b.text} / ${b.cls}`)
-  ok(`  ${label}: tinted ${cls ? cls : 'as a plain badge'}`, b.cls === cls, b.cls)
-  ok(`  ${label}: it explains itself`, typeof b.title === 'string' && b.title.length > 30,
-     String(b.title).slice(0, 40))
-  ok(`  ${label}: the chip ${keeps ? 'keeps' : 'leaves out'} the card the mark is on`,
+const PLATFORM_WORDS = /runs on Windows|Windows, no NVIDIA|no Windows check-in|nobody has run it/
+for (const [label, app, keeps] of rigCases) {
+  const cardText = texts(__fns.StoreCard({
+    ctx: instCtx, app: Object.assign({ slug: 'x', name: 'X' }, app), onInstalled: () => {},
+  })).join(' ')
+  ok(`  ${label}: the card carries no platform badge`, !PLATFORM_WORDS.test(cardText),
+     cardText.slice(0, 120))
+  ok(`  the chip ${keeps ? 'keeps' : 'leaves out'} the card: ${label}`,
      __fns.rigMatch(app, true) === keeps)
   ok(`  with the chip off, ${label} is shown`, __fns.rigMatch(app, false) === true)
 }
-const rigTexts = rigCases.map(([, app]) => __fns.rigBadge(app).text + ' '
-  + __fns.rigBadge(app).title).join(' ').toLowerCase()
-ok('  the mark never claims the app needs anything',
-   !/\brequires?\b|\bmust have\b|\bneed(s|ed)? an?\b/.test(rigTexts), rigTexts.slice(0, 80))
-ok('  and never promises a speed',
-   !/\bfast(er)?\b|\bquick(er|ly)?\b|\bsmooth\b|\bfps\b|\bruns well\b/i.test(rigTexts))
-ok('  (the word "speed" itself is only ever used to disclaim one)',
-   !/\bspeed\b/i.test(rigTexts) || /nothing about speed/i.test(rigTexts))
-ok('  a check-in mark says what it is counting',
-   /check-in/.test(__fns.rigBadge(RB({ platforms: { windows: true }, gpus: { nvidia: true } })).title))
 
 
 // ---- the store no longer sells agent control --------------------------------

@@ -1,0 +1,33 @@
+Athena — the local AI app store for Hermes
+Copyright (c) 2026 Zack Horton. MIT licensed; see LICENSE.
+
+Athena bundles a copy of the engine it runs apps with, and that engine is
+someone else's work. This file is the short version; THIRD-PARTY.md is the full
+inventory of every package in `engine/node_modules`, read from each package's
+own metadata.
+
+pinokiod 8.2.0
+  The daemon behind Pinokio (https://pinokio.computer), vendored unmodified under
+  `engine/node_modules/pinokiod` and booted as a plain Node process by
+  `engine/boot.js`. MIT, per its npm package metadata
+  (https://www.npmjs.com/package/pinokiod). The published package ships no licence
+  file of its own; this notice is the attribution it asks for. Pinokio and its
+  catalogue of apps are not part of this project and are not covered by Athena's
+  licence.
+
+Transitive dependencies
+  501 packages under `engine/node_modules` — every distinct `name@version` with a
+  `package.json` in the tree, nested copies included, counted the way
+  `THIRD-PARTY.md` describes — all under permissive licences (MIT, ISC,
+  BSD-2/3-Clause, Apache-2.0, BlueOak-1.0.0, Unlicense, WTFPL, and the
+  dual-licence combinations of those). No copyleft licence appears anywhere in
+  the tree. Exactly one package declares no licence field at all —
+  `copy-paste@2.2.0` — and is named here rather than counted as "MIT, probably".
+  (An earlier revision of this notice named a second one, `beep-boop@1.2.3`. That
+  is not a package: it is the fixture inside `github-from-package/example`, which
+  is a file shipped within another package and is left out of the count for the
+  reason `THIRD-PARTY.md` gives.)
+
+The apps Athena installs are not distributed with Athena. They are cloned from
+their own repositories at the user's request and carry their own licences, which
+is what the app's own page in the store is for.

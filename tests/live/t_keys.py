@@ -85,23 +85,37 @@ SETTINGS.write_text(json.dumps({"home": str(HOME), "port": 42001,
                                 "share_caches": False}), encoding="utf-8")
 api.SETTINGS_FILE = SETTINGS
 
-# Credentials: the only thing this needs to see is a token *file*; a stub that
-# raises proves no subprocess is on the path (`collect_credentials` runs `gh` and
-# `hf` with 20s timeouts, which is not something a badge may trigger).
-(HOME / "cache" / "HF_AUTH").mkdir(parents=True, exist_ok=True)
-(HOME / "cache" / "HF_AUTH" / "token").write_text("hf_fake\n", encoding="utf-8")
+# Credentials: a token *file* is the thing this needs to see. `_held_providers`
+# reads the standard Hugging Face locations under the user's home — a badge must
+# not open Hermes' own auth.json — so point pathlib's home at the sandbox and
+# write the token there. The real user profile is never touched.
+import pathlib
+_real_home = pathlib.Path.home
+pathlib.Path.home = staticmethod(lambda: HOME)
+(HOME / ".cache" / "huggingface").mkdir(parents=True, exist_ok=True)
+(HOME / ".cache" / "huggingface" / "token").write_text("hf_fake\n", encoding="utf-8")
+
+# The collector is stubbed out to prove the badge degrades instead of failing:
+# `collect_credentials` now reads Hermes' secret routes and no longer shells out,
+# but a badge must still answer when it cannot reach them at all.
+COLLECTOR_CALLS: list[int] = []
 
 
 def no_subprocess(*a, **kw):
-    raise AssertionError("_held_providers shelled out: collect_credentials was called")
+    COLLECTOR_CALLS.append(1)
+    raise AssertionError("collect_credentials was called")
 
 
 api.collect_credentials = no_subprocess
 
 print("what Hermes already holds, without asking anybody")
-held = api._held_providers()
-check("a token file on disk counts as held", "huggingface" in held, str(held))
-check("and nothing was shelled out to find it", True)
+try:
+    held = api._held_providers()
+finally:
+    pathlib.Path.home = _real_home
+check("the badge consults Hermes' credential collector first", bool(COLLECTOR_CALLS))
+check("a failing collector does not break the badge", "huggingface" in held, str(held))
+check("a token file at the standard location counts as held", "huggingface" in held, str(held))
 check("a provider confirmed nowhere is not claimed",
       "replicate" not in held, str(held))
 

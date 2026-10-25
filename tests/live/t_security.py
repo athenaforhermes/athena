@@ -103,8 +103,10 @@ me = Path(os.path.realpath(Path.home()))
 
 check("Athena's home is a read root", home in read_roots, str(read_roots))
 check("... and so is every fixed disk", len(read_roots) >= 2, str(read_roots))
-check("writes reach Athena's home and the person's own folder, and nothing else",
-      write_roots == [home, me], str(write_roots))
+check("a write reaches Athena's home and nothing else, by default",
+      write_roots == [home], str(write_roots))
+check("... and no folder is a write root until a person names one",
+      files._named_write_roots() == [], str(files._named_write_roots()))
 
 # A file on a disk is readable: reads are deliberately wide, and pretending otherwise would
 # make this a test of a rule Athena does not have.
@@ -121,7 +123,8 @@ check("... and the refusal says where Athena may look",
 escaped, why = refused("a write into Windows",
                        files.enforce, [str(Path(os.environ.get("SystemDrive", "C:") + "/Windows/Temp"))],
                        write=True)
-check("a write outside the person's own folder is refused", escaped, why)
+check("a write outside Athena's home — and outside any folder you named — is refused",
+      escaped, why)
 check("... and that refusal says what the write scope is", "change" in why, why[:200])
 check("while the same path is still readable, because reads are wide",
       not refused("a read of Windows", files.enforce,
@@ -144,10 +147,12 @@ check("a linked folder resolves outside the roots, so it is not 'inside' anythin
       not files._in_roots(link / "System32", write_roots)
       if made_link else False, "the link was not created")
 if made_link:
-    # The write roots are [home, me]; the scratch dir is under the system temp, which is not one
-    # of them, so the *link itself* is already out of scope. The interesting assertion is the
-    # one about a link planted where a write IS allowed: it still cannot reach its target.
-    in_scope_link = me / ".athena-sec-probe"
+    # The write roots are [home] — Athena's own home, and nothing else until a person names a
+    # folder — so the scratch dir under the system temp is already out of scope, as is the
+    # person's own folder. The interesting assertion is the one about a link planted where a
+    # write IS allowed: it still cannot reach its target. The probe is therefore planted
+    # inside Athena's home, the one folder a write may land in.
+    in_scope_link = home / ".athena-sec-probe"
     try:
         link_to(outside, in_scope_link)
         check("a symlink planted inside an allowed root still cannot reach its target",
@@ -162,7 +167,8 @@ if made_link:
             pass
 
 print("\n== what a path may be, even when it is in scope ==")
-# `~/.ssh` is inside the person's own folder, so scope alone would hand over a private key.
+# `~/.ssh` is inside the *read* scope — reads are deliberately wide, every fixed disk — so
+# scope alone would hand over a private key.
 reason = files._secret_reason(me / ".ssh" / "id_rsa")
 check("a private key in the person's own folder is refused by the second question",
       reason == "~/.ssh", reason)

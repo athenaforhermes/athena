@@ -51,55 +51,93 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 sys.path.insert(0, str(DASH))
 import catalog as C  # noqa: E402
 
-print("== the store is a repository, read through Hermes' own login ==")
+print("== no store until a person names one ==")
 token = C._gh_token()
-check("a GitHub token is available from the existing login (no second sign-in)",
-      bool(token))
+# Fail closed: with no secret scope active there is no token to hand out, and the
+# read has to say so rather than blow up a caller who has not signed in. This is
+# the property the review asks for — a GitHub credential is either the one Hermes
+# already holds for you, or nothing at all.
+check("a token read with no scope active fails closed instead of crashing",
+      token == "", repr(token))
 
-check("the shipped default is Athena's own repository, not a person's handle",
-      C.STORE_REPO == "athenaforhermes/athena-store", C.STORE_REPO)
-check("…and the index URL is derived from it",
-      C.STORE_INDEX == "https://raw.githubusercontent.com/athenaforhermes/"
-                       "athena-store/main/index.json", C.STORE_INDEX)
+check("there is no default store: the product never picks a repository for you",
+      C.STORE_REPO is None and C.STORE_URL == "" and C.STORE_INDEX == "",
+      f"{C.STORE_REPO!r} / {C.STORE_URL!r} / {C.STORE_INDEX!r}")
+check("…so with nothing named, the default source is empty rather than Athena's own",
+      C.default_source() == "", C.default_source())
 
-urlmap = C._to_api_url(C.STORE_INDEX)
+urlmap = C._to_api_url("https://raw.githubusercontent.com/someone/"
+                       "some-store/main/index.json")
 check("a raw GitHub URL maps to the contents API for the private route",
       bool(urlmap) and "api.github.com" in urlmap and "index.json" in urlmap, urlmap)
 check("an owner/repo shorthand maps to an index read",
-      "index.json" in (C._to_api_url("athenaforhermes/athena-store") or ""))
+      "index.json" in (C._to_api_url("someone/some-store") or ""))
 
-# The card's rig mark is only as good as these two maps surviving `_enrich`. The
+# The chip's filter is only as good as these two maps surviving `_enrich`. The
 # catalogue declares no VRAM and no disk figure — it never has — so "somebody runs
 # this on Windows + NVIDIA" is the only rig-fit fact a store row carries, and a
-# row that quietly loses it would make the chip look like a broken filter.
+# row that quietly loses it would make the chip look like a broken filter. The
+# per-card badge that used to read the same maps is gone; the chip is opt-in.
 en = C._enrich({"slug": "x", "title": "X", "checkinsCount": 7,
                 "checkinsPlatforms": {"windows": True, "linux": True},
                 "checkinsGpus": {"nvidia": True}}, HOME)
-check("a store row keeps the check-in platforms and GPUs the rig mark reads",
+check("a store row keeps the check-in platforms and GPUs the chip filter reads",
       en.get("platforms", {}).get("windows") is True
       and en.get("gpus", {}).get("nvidia") is True and en.get("checkins") == 7,
       str({k: en.get(k) for k in ("platforms", "gpus", "checkins")}))
 
-anon = False
-try:
-    C._get_json(C.STORE_INDEX, timeout=20)
-except C.CatalogError as e:
-    anon = "404" in str(e) or "403" in str(e)
-check("the store is private: an anonymous read is refused", anon)
+# The review's rule is that a private store is never read without the credential
+# Hermes holds for you — so with no store named there is no read to make, and
+# nothing goes out first. A request that is made "anonymously" is exactly what
+# must not happen.
+sent: list = []
+real_json = C._get_json
+C._get_json = lambda url, *a, **k: (sent.append(url) or {})
+plain = C.fetch_source(HOME, force=True)
+C._get_json = real_json
+check("with no store named, Athena sends no request at all", sent == [], str(sent))
 
-data = C.fetch_source(HOME, force=True)
-apps = data.get("apps") or []
-print(f"       fetched {len(apps)} apps via {data.get('index')}")
-check("the index reads through GitHub with the token", not data.get("error"),
-      str(data.get("error"))[:300])
-check("the catalogue is the published placeholder: no apps in it yet",
-      isinstance(apps, list) and apps == [], str(apps)[:200])
-check("it records which repository it came from",
-      str(data.get("repo") or "").endswith("athena-store"), data.get("repo"))
-check("the index is cached on disk next to the catalogue cache",
-      C._source_path(HOME).is_file())
-recent = time.time() - json.loads(C._source_path(HOME).read_text())["fetched_at"] < 60
-check("the cached copy is fresh, not a stale leftover", recent)
+apps = plain.get("apps") or []
+check("nothing named means nothing is fetched",
+      isinstance(apps, list) and apps == [] and not plain.get("index"),
+      str(plain)[:200])
+check("…and no failure is recorded against it", not plain.get("error"), str(plain)[:200])
+check("…so nothing is cached as though a store had been read",
+      not C._source_path(HOME).is_file())
+
+# …and the panel's own reading of that state: empty, with nothing broken.
+_real_page, _real_index = C._page_cached, C.index
+C._page_cached = lambda *a, **k: (_ for _ in ()).throw(C.CatalogError("offline"))
+C.index = lambda home: {"apps": [], "warming": False}  # type: ignore[assignment]
+empty = C.browse(HOME, 0, 60)
+C._page_cached, C.index = _real_page, _real_index
+check("the panel reports an unnamed store as empty, not as an error",
+      empty.get("athena_empty") is True, str(empty)[:200])
+check("…with no error attached to it",
+      empty.get("athena_error") == "", empty.get("athena_error"))
+
+# A store a person names is remembered, and read from where they pointed it.
+named = HOME / "named"
+(named / "api").mkdir(parents=True, exist_ok=True)
+named_index = "https://raw.githubusercontent.com/someone/some-store/main/index.json"
+C.set_source(named, named_index)
+check("a store a person names is remembered", C.source_url(named) == named_index,
+      C.source_url(named))
+
+seen: list = []
+real_get = C._get_json
+C._get_json = lambda url, *a, **k: (seen.append(url) or {
+    "repo": "someone/some-store",
+    "apps": [{"slug": "named-app", "title": "Named", "ref": "athena-named"}]})
+read = C.fetch_source(named, force=True)
+C._get_json = real_get
+check("…and it is the store Athena then reads", seen == [named_index], str(seen))
+check("…so the apps it carries are the store's apps",
+      [a.get("slug") for a in read.get("apps") or []] == ["named-app"],
+      str(read.get("apps"))[:200])
+check("…and the read is cached beside the catalogue, marked fresh",
+      C._source_path(named).is_file()
+      and time.time() - json.loads(C._source_path(named).read_text())["fetched_at"] < 60)
 
 print("\n== an empty catalogue is a state, not a failure ==")
 old_page, old_index, old_get = C._page_cached, C.index, C._get_json
@@ -112,13 +150,19 @@ check("…with no failure attached to it", b.get("athena_error") == "", b.get("a
 check("…and hands back no store apps", b.get("athena_store") == 0, b.get("athena_store"))
 
 print("\n== an unreachable index is reported as unreachable, not as empty ==")
+# A store that IS named but cannot be read is a different state from one that was
+# never named: the panel has to be able to tell "the store is empty" from "the
+# store is there and we could not reach it".
+dead = HOME / "unreachable"
+(dead / "api").mkdir(parents=True, exist_ok=True)
+C.set_source(dead, "https://raw.githubusercontent.com/someone/some-store/main/index.json")
 C._get_json = lambda *a, **k: (_ for _ in ()).throw(C.CatalogError("404 Not Found"))
-raw = C.fetch_source(HOME / "unreachable", force=True)
+raw = C.fetch_source(dead, force=True)
 check("fetch_source returns an empty list and the reason instead of raising",
       raw.get("apps") == [] and "404" in str(raw.get("error") or ""), str(raw)[:200])
 check("…and the reason is kept for the panel",
       "404" in str(C._SOURCE_STATUS.get("error") or ""), C._SOURCE_STATUS.get("error"))
-u = C.browse(HOME / "unreachable", 0, 60)
+u = C.browse(dead, 0, 60)
 check("browse does not raise when the index cannot be read", isinstance(u, dict))
 check("…and says the store is empty", u.get("athena_empty") is True, str(u)[:200])
 check("…while carrying the reason, so it is not mistaken for a published empty store",
@@ -194,8 +238,9 @@ other = HOME / "home2"
 C.set_source(other, "https://example.com/my-store/index.json")
 check("a custom index is remembered", C.source_url(other) == "https://example.com/my-store/index.json")
 C.set_source(other, "")
-check("clearing it falls back to Athena's own store", C.source_url(other) == C.default_source())
-check("a home with no setting at all still reads Athena's store",
+check("clearing it leaves no store named, not a product-chosen one",
+      C.source_url(other) == C.default_source())
+check("a home with no setting at all reads no store either",
       C.source_url(Path(tempfile.gettempdir()) / "definitely-not-here") == C.default_source())
 
 import plugin_api as A  # noqa: E402

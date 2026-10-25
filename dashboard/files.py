@@ -382,8 +382,14 @@ def _athena_home() -> Path:
 # Reading is wide on purpose: picking a file to hand an app, or pointing one at a folder, is what a
 # person does in Explorer on their own machine, and the agent's tool calls run with the same rights
 # the person has. Writing is narrow for the same reason in reverse: there is no confirmation step
-# between a model's tool call and `os.remove`, and a person's own files live in their own folder.
-# The line that keeps this from being a hole is `_deny_secret` below, not the roots.
+# between a model's tool call and `os.remove`.
+#
+# Narrower than it was (store review, item 5): the person's whole home folder used to be a write
+# root, which on Windows is `C:/Users/<name>` -- every document, project, config and dotfile on the
+# machine, writable by one tool call. Athena's own home is the scope now, plus folders the person
+# names in `write_roots` (see `_named_write_roots`). `_deny_secret` below still has the last word on
+# what a path *is*, and `_safety_reason` adds the agent's own file-safety rules and the folders that
+# hold code which runs after the write.
 _DRIVE_TTL_SECONDS = 5.0
 _DRIVES_CACHE: Dict[str, Any] = {"at": 0.0, "list": []}
 
@@ -424,13 +430,58 @@ def _read_roots() -> List[Path]:
     return [_athena_home()] + _fixed_drives()
 
 
+# Folders a person names when they want Athena able to change something outside its own home.
+# Two ways in, and both are the person's own act rather than a model's: the `ATHENA_WRITE_ROOTS`
+# environment variable, and `write_roots` in Athena's settings.json. `os.pathsep`-separated, a
+# list, or a single path; nothing named means "Athena's home only", which is the default.
+_WRITE_ROOTS_ENV = "ATHENA_WRITE_ROOTS"
+
+
+def _named_write_roots() -> List[Path]:
+    """Folders the person has named for writing, in the order they named them.
+
+    A default install names none, and that is the point: the agent's write scope is Athena's
+    own home until somebody says otherwise, rather than the whole of the user's home folder.
+    It is read from the person's own configuration and never from a tool argument, because a
+    path a model passes is a path a model chose -- which is the one thing this has to keep out.
+    """
+    named: List[str] = [p for p in (os.environ.get(_WRITE_ROOTS_ENV) or "").split(os.pathsep)
+                        if p.strip()]
+    for cfg_file in (PLUGIN_DIR / "settings.json", _athena_home() / "settings.json"):
+        try:
+            cfg = json.loads(cfg_file.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(cfg, dict):
+            continue
+        got = cfg.get("write_roots")
+        if isinstance(got, str):
+            got = [got]
+        if isinstance(got, (list, tuple)):
+            named.extend(str(p) for p in got if str(p).strip())
+    out: List[Path] = []
+    for item in named:
+        try:
+            rp = Path(os.path.realpath(Path(str(item).replace("\\", "/")).expanduser()))
+        except Exception:
+            continue
+        if rp not in out:
+            out.append(rp)
+    return out
+
+
 def _write_roots() -> List[Path]:
-    """Where it may change something: Athena's home, and the person's own folder."""
+    """Where it may change something: Athena's home, and only the folders a person named.
+
+    It used to be Athena's home *and the whole of the user's home folder* -- so every
+    document, project, config and dotfile under `C:/Users/<name>` was writable by a model's
+    tool call, with no confirmation between the two. Naming a folder is still allowed and is
+    still a person's decision; the default is the narrow answer now.
+    """
     out = [_athena_home()]
-    try:
-        out.append(Path(os.path.realpath(Path.home())))
-    except Exception:
-        pass
+    for rp in _named_write_roots():
+        if rp not in out:
+            out.append(rp)
     return out
 
 
@@ -473,26 +524,41 @@ def enforce(paths: Any, write: bool = False) -> None:
         if not raw:
             continue
         p = Path(str(raw).replace("\\", "/"))
+        # What a path *is*, asked before where it sits. A private key or a saved session is
+        # refused as that, on a read and on a write, inside the scope and outside it -- asking
+        # the roots first would report `~/.ssh/id_rsa` as merely "outside the folders Athena may
+        # change", which is the lesser of the two facts about it. Routes keep their own
+        # `_deny_secret` calls for the wording they already show; nothing depends on them.
+        if (why := _secret_reason(p)):
+            raise HTTPException(status_code=403, detail={
+                "error": "refusing " + why + ": " + str(raw),
+                "why": "that is a credential store, a private key or a saved session, and "
+                       "this browser neither reads nor writes one wherever it sits",
+            })
+        # Then where it sits. This is the scope, and it is the half a route can forget.
         if not _in_roots(p, roots):
             raise HTTPException(status_code=403, detail={
                 "error": (REFUSED + (" change: " if write else " read: ")) + str(raw),
                 "roots": [str(r) for r in roots],
                 # Said in the refusal so a person reading it in the panel knows what to do about
                 # it, and so an agent can choose a folder that would work instead of retrying.
-                "why": ("Athena only changes files in its own home and in your own folder"
+                "why": ("Athena only changes files in its own home, and in folders you named "
+                        "for it (write_roots)"
                         if write else
                         "Athena reads Athena's home and your fixed disks, and refuses credential stores"),
             })
-        # The second question, at the same floor. The roots decide *where*, this decides *what*,
-        # and a route that remembered one and forgot the other is exactly the shape of bug this
-        # function exists to end: `~/.ssh` is inside the write scope (your own folder), so scope
-        # alone would hand over a private key. Routes keep their own `_deny_secret` calls for the
-        # wording they already show, but nothing depends on them any more.
-        if (why := _secret_reason(p)):
+        # The third question, and the last word on writing: what the agent's own file-safety
+        # rules say, plus the folders that hold code which runs later. Here rather than in the
+        # routes because every write comes through this function -- the HTTP routes *and* the
+        # in-process tool call -- and a rule a new route can forget is not a rule. Writes only:
+        # reads are deliberately wide, and the identity check above already guards a read.
+        if write and (why := _safety_reason(p)):
             raise HTTPException(status_code=403, detail={
-                "error": "refusing " + why + ": " + str(raw),
-                "why": "that is a credential store, a private key or a saved session, and "
-                       "this browser neither reads nor writes one wherever it sits",
+                "error": "refusing to change " + why + ": " + str(raw),
+                "roots": [str(r) for r in roots],
+                "why": "Athena does not write a credential store, Hermes' own code and state "
+                       "(plugins, cron, scripts, profiles), a shell profile or Windows' "
+                       "Startup folder, because writing one of those runs code later",
             })
 
 
@@ -518,6 +584,12 @@ def _guard_root(p: Path, write: bool = False) -> Optional[JSONResponse]:
             status_code=403)
     if (why := _secret_reason(p)):
         return JSONResponse({"error": "refusing " + why}, status_code=403)
+    # Kept as a direct call as well as the one in `enforce`: the write paths that already had
+    # this guard should not lose it if one of them stops calling `enforce` first.
+    if write and (why := _safety_reason(p)):
+        return JSONResponse(
+            {"error": "refusing to change " + why, "roots": [str(r) for r in roots]},
+            status_code=403)
     return None
 
 
@@ -536,7 +608,8 @@ async def sandbox_dep(request: FastAPIRequest) -> None:
     """Refuse any request whose caller-supplied path this browser may not read.
 
     Read scope only: this is the floor under every route, and a route that changes something
-    enforces write scope itself (files in the home and the person's own folder). Applied
+    enforces write scope itself (files in Athena's home, and in folders the person named).
+    Applied
     router-wide (see plugin_api.py) instead of per-route: the point is that a *new* read route
     cannot forget the check, which is exactly how the port left the disk readable.
 
@@ -700,6 +773,143 @@ def _secret_reason(p: Path) -> str:
     # Last, because it is the cheapest test and the broadest: a name that means a stored secret.
     if rp.name.lower() in _SECRET_NAMES:
         return "a credential store"
+    return ""
+
+
+# ------------------------------------------------------------------ the agent's own rules
+#
+# Athena's browser is not the only thing that knows where an agent must not write. Hermes
+# already keeps that list -- `agent/file_safety.py`, the same predicates the terminal, the file
+# tools and the batch writer answer to: credential stores, the Python runtime this process
+# boots from, `HERMES_WRITE_SAFE_ROOT`, and Windows' NT/device namespace, where merely
+# *resolving* the path leaks an NTLM hash before any write happens. Asking it here, instead of
+# keeping a second copy, is the only version of this that cannot drift.
+#
+# What it does not name is the other half of "do not write here": folders holding *code that
+# runs later*. A plugin's skills are loaded and executed by the agent, a cron entry fires on its
+# own, a script is a command waiting for a caller, a profile is another whole Hermes with its own
+# memory and credentials, a shell start-up file runs at the next login, and Windows' Startup
+# folder is the same thing with a folder name.
+
+# Relative to Hermes' home.
+_HERMES_WRITE_PROTECTED = ("plugins", "skills", "cron", "scripts", "profiles")
+
+# Relative to the person's own profile.
+_PROFILE_WRITE_PROTECTED = (
+    ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile",
+    ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".cshrc", ".tcshrc", ".kshrc",
+    ".config/fish/config.fish", ".config/powershell/profile.ps1",
+    "Documents/WindowsPowerShell", "Documents/PowerShell",
+    "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup",
+)
+
+_FILE_SAFETY: Any = None
+_FILE_SAFETY_TRIED = False
+_PROTECTED_ROOTS: Optional[List[Path]] = None
+
+
+def _file_safety():
+    """`agent/file_safety.py` -- Hermes' own write predicates -- imported once, lazily.
+
+    Lazy because this module is also imported on its own by the plugin's tests, where there is
+    no `agent` on the path: an import here must never be why the file browser stops loading.
+    When it is missing the answer is the local list below plus `_secret_reason`, which already
+    refuses credential stores, rather than no guard at all.
+    """
+    global _FILE_SAFETY, _FILE_SAFETY_TRIED
+    if _FILE_SAFETY_TRIED:
+        return _FILE_SAFETY
+    _FILE_SAFETY_TRIED = True
+    try:
+        from agent import file_safety as fs  # type: ignore
+        _FILE_SAFETY = fs
+    except Exception:  # noqa: BLE001
+        _FILE_SAFETY = None
+    return _FILE_SAFETY
+
+
+def _hermes_homes() -> List[Path]:
+    """Hermes' home as this plugin sees it, and the install a profile of it belongs to."""
+    out: List[Path] = []
+    try:
+        home = Path(os.path.realpath(PLUGIN_DIR.parent.parent))
+    except Exception:
+        return out
+    out.append(home)
+    try:
+        for parent in home.parents:
+            if parent.name.lower() == "profiles":
+                out.append(parent.parent)      # <root>/profiles/<name> -> <root>
+                break
+    except Exception:
+        pass
+    return out
+
+
+def _protected_roots() -> List[Path]:
+    """Folders a write is refused under, beyond `agent/file_safety`'s own list.
+
+    Resolved once and kept: this is asked once per caller-supplied path on every write, and
+    every entry costs a realpath of a folder that usually does not exist. There is nothing to
+    invalidate -- the plugin is loaded by one Hermes, and `PLUGIN_DIR` is that one's path.
+    """
+    global _PROTECTED_ROOTS
+    if _PROTECTED_ROOTS is not None:
+        return _PROTECTED_ROOTS
+    candidates: List[Path] = []
+    for base in _hermes_homes():
+        candidates.extend(base / rel for rel in _HERMES_WRITE_PROTECTED)
+    try:
+        me = Path.home()
+    except Exception:
+        me = None
+    if me is not None:
+        candidates.extend(me / rel for rel in _PROFILE_WRITE_PROTECTED)
+    resolved: List[Path] = []
+    for p in candidates:
+        try:
+            rp = Path(os.path.realpath(p))
+        except Exception:
+            continue
+        if rp not in resolved:
+            resolved.append(rp)
+    _PROTECTED_ROOTS = resolved
+    return resolved
+
+
+def _safety_reason(p: Path) -> str:
+    """Why the agent's own file-safety rules refuse a write here, in words, or "".
+
+    Two questions, both answered by name rather than by guess: what `agent/file_safety.py`
+    says -- the authority, since a second copy of its list here is a copy that drifts -- and
+    the folders that hold code which runs later. Pure and total: it is called on every write
+    path, with whatever a caller sent.
+    """
+    try:
+        raw = str(p)
+    except Exception:  # noqa: BLE001
+        return "a path that cannot be read"
+    fs = _file_safety()
+    if fs is not None:
+        try:
+            # On the raw string, before any realpath: resolving an NT/device-namespace path is
+            # itself the NTLM-leak trigger, and that check is why the module exists.
+            if fs.is_nt_namespace_path(raw):
+                return "an NT/device namespace path"
+            if fs.is_write_denied(raw):
+                return "a path the agent's own file-safety rules protect"
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        rp = Path(os.path.realpath(p))
+    except Exception:  # noqa: BLE001
+        return "a path that cannot be resolved"
+    for root in _protected_roots():
+        try:
+            if rp == root or root in rp.parents:
+                return "a folder that holds code Hermes runs, or another profile's own state"
+        except Exception:
+            continue
     return ""
 
 

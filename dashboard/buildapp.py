@@ -30,6 +30,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import credentials as athena_credentials
+import engine as athena_engine
 import naming as athena_naming
 
 GUIDE_REL = "docs/build-an-app.md"
@@ -110,21 +112,35 @@ def slug_for(text: str) -> str:
 
 
 def _gh_token() -> str:
-    """Hermes's existing GitHub login — never ask the user for one."""
-    for cmd in (["gh", "auth", "token"],):
-        rc, out = _run(cmd, timeout=30)
-        tok = out.strip().splitlines()[-1].strip() if out.strip() else ""
-        if rc == 0 and tok and " " not in tok:
-            return tok
-    return ""
+    """Hermes's existing GitHub login — never ask the user for one.
+
+    Read through Hermes' secret route (`credentials.collect_credentials`), the same
+    one the rest of the plugin uses and the same one `plugin.yaml`'s
+    `requires_env: [GITHUB_TOKEN]` declares. This used to shell out to
+    `gh auth token`: a subprocess that reaches into another program's login store,
+    which is the read the security review removed everywhere else in the tree — a
+    read that also made every reconnaissance step cost a process.
+    """
+    try:
+        creds = athena_credentials.collect_credentials(None).get("github") or {}
+        return str(creds.get("token") or "")
+    except Exception:  # noqa: BLE001 - no credential reads as an empty one, not a crash
+        return ""
 
 
 def _auth_env() -> Dict[str, str]:
-    env = dict(os.environ)
+    """The environment a git child of this module runs with.
+
+    `os.environ` copied wholesale handed whatever token happened to sit in Athena's
+    own process to every child that asked for git, decided by nothing — the leak
+    `child_env` exists to close. It keeps the machine's settings (PATH, temp dir,
+    proxy, CA bundle), which is what git actually needs, and the token comes from
+    the one route that reads one.
+    """
+    env = athena_engine.child_env({"GIT_TERMINAL_PROMPT": "0"})
     tok = _gh_token()
     if tok:
         env["GH_TOKEN"] = tok
-        env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
 
@@ -310,10 +326,10 @@ def recon(url: str, cache_dir: Path, timeout: int = 600) -> Dict[str, Any]:
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Public first: a stale credential must not turn a readable repo into a
         # 404. The token is only for the private case, where it is required.
-        rc, out = _run(["git", "clone", "--depth", "1", parts["clone_url"], str(dest)], timeout=timeout)
+        rc, out = _run(["git", "clone", "--depth", "1", "--", parts["clone_url"], str(dest)], timeout=timeout)
         if rc != 0:
             shutil.rmtree(dest, ignore_errors=True)
-            rc, out2 = _run(["git", "clone", "--depth", "1", parts["clone_url"], str(dest)],
+            rc, out2 = _run(["git", "clone", "--depth", "1", "--", parts["clone_url"], str(dest)],
                             timeout=timeout, env=_auth_env())
             if rc != 0:
                 return {"ok": False, "error": f"git clone failed: {out2.strip()[-800:]}", "repo": parts}
@@ -400,7 +416,7 @@ T_INSTALL = """module.exports = {
     {
       method: "shell.run",
       params: {
-        message: [ "git clone @@CLONE_URL@@ app" ],
+        message: [ "git clone -- @@CLONE_URL@@ app" ],
         // Guard on what the clone produces, not on the folder: the app's
         // virtual environment lives inside app/ too, so a bare exists('app')
         // check is defeated the moment anything else has run.

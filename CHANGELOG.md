@@ -28,6 +28,35 @@ be supported.
 The version is bumped because the product description and the claim surface
 changed, not because the API did.
 
+### Review pass — the ten things a plugin-store security review asked for
+
+- **Credential route.** One function reads a token, from Hermes' own secret store; it is handed
+  to an app as an environment variable for the life of that app's process, never logged and never
+  written to disk in plaintext. Nothing reads another program's token store.
+- **Environment allowlist.** The engine is spawned with the variables it needs, not with
+  everything the user's shell happens to export.
+- **Approval prompts.** Every tool that runs, writes, deletes or pushes asks through Hermes'
+  approval hook first.
+- **Write confinement.** A write outside Athena's home and the folders a person has named is
+  refused, not created.
+- **WSL.** The gate in front of a guest is tightened: a distribution Athena owns is hardened
+  before anything runs in it, and a command that fails hardening is refused rather than run
+  anyway; the flag meaning "a person said yes to *this* command" is not something the tool
+  surface sets for itself.
+- **A scheduled run is not a public route.** The script Hermes' own cron runs imports the
+  plugin's code and calls the same function a hand-started run calls, so nothing that can reach
+  a port can start one.
+- **The engine is provisioned, not vendored.** Setup installs it from npm at the pinned version,
+  from the committed lockfile, behind a consent step that names the version.
+- **The file picker is the SDK's.** The panel asks the host through `ctx.os.pickOpenPath` instead
+  of reaching into a window global that may not exist.
+- **Publishing asks.** A push is confirmed before it happens and goes only to the repository the
+  person named.
+- **The description matches the plugin.** The README now says that third-party install scripts run
+  with the user's privileges, that a background engine runs, which endpoints are contacted, that
+  WSL and QEMU guests accept command execution, and that publishing exists — and it no longer
+  claims a credential is reused in the way the review could not support.
+
 ## 1.0.0
 
 The local AI app store for Hermes. Browse a catalogue of thousands of AI apps,
