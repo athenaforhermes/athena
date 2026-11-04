@@ -436,6 +436,81 @@ check("... and it is the start route that says so, not the machines module",
 check("... and where the command line is built, a hand-edited spec is refused by field",
       "spec_problem(spec)" in _api_src)
 
+# --- an app started by a tool that never asked ----------------------------------------
+# `athena_launch` asks the person before it starts an app, and the question was attached to
+# that tool. Two other tools reach the same start through `_ensure_app` -- `athena_generate`
+# and `athena_capabilities` both take an app's capabilities by *starting* it -- so an agent
+# could put third-party code on this machine by asking what it can do. The question is asked
+# where the app is actually started now, under the rule key `athena_launch` already uses, so
+# one answer covers both doors and nobody is asked twice about one app.
+print("\n-- starting an app is the question, whichever tool starts it --")
+_pk = load("athena_plugin_gate_under_test", PLUGIN / "__init__.py")
+
+_started: list = []
+
+
+class _Engine:
+    port = 47311
+    home = Path(".")
+
+    def __init__(self, yes: bool):
+        self.yes, self.asked = yes, []
+
+    def ask_approval(self, tool, message, rule_key=""):
+        self.asked.append((tool, message, rule_key))
+        return {"approved": self.yes, "message": "" if self.yes else "not now"}
+
+
+class _Runtime:
+    def __init__(self, port, home):
+        pass
+
+    def start(self, app_id):
+        _started.append(app_id)
+        return {"ok": True}
+
+
+def _app_mod(engine):
+    return SimpleNamespace(engine=engine, athena_runtime=SimpleNamespace(Runtime=_Runtime))
+
+
+_real_live, _real_idle = _pk._live, _pk._idle_use
+_pk._live = lambda mod: {}
+_pk._idle_use = lambda *a, **k: None
+try:
+    refused = _Engine(False)
+    out = _pk._ensure_app(_app_mod(refused), "some-app", seconds=0.0)
+    check("a refused start is refused by the tools that start an app",
+          not _started and out.get("url") == "", str(out)[:140])
+    check("... and the refusal is a sentence, not an empty URL", bool(out.get("note")),
+          str(out)[:140])
+    check("... and it is asked under the rule key `athena_launch` already asks under",
+          bool(refused.asked) and refused.asked[0][2] == "athena:launch", str(refused.asked))
+    check("... and the question names the app it is about",
+          bool(refused.asked) and "some-app" in refused.asked[0][1], str(refused.asked))
+
+    _started.clear()
+    allowed = _Engine(True)
+    _pk._ensure_app(_app_mod(allowed), "some-app", seconds=0.0)
+    check("and a yes starts it, once, exactly as it did before",
+          _started == ["some-app"], str(_started))
+
+    # What this must not become: a second question about an app that is already up.
+    _pk._live = lambda mod: {"running": {"url": "http://127.0.0.1:9999"}}
+    again = _Engine(False)
+    got = _pk._ensure_app(_app_mod(again), "running", seconds=0.0)
+    check("... while an app that is already running is not asked about again",
+          got.get("url") == "http://127.0.0.1:9999" and not again.asked, str(got)[:140])
+
+    # The one order this cannot be in: asking after the thing has started.
+    _src = (PLUGIN / "__init__.py").read_text(encoding="utf-8")
+    _fn = _src[_src.index("def _ensure_app"):]
+    _fn = _fn[:_fn.index("\ndef ", 1)]
+    check("... and the question is asked before the start, never after it",
+          _fn.index("ask_approval") < _fn.index("rt.start(app_id)"), "order")
+finally:
+    _pk._live, _pk._idle_use = _real_live, _real_idle
+
 print(f"\nt_hardening: {PASS} passed, {FAIL} failed")
 if FAILURES:
     for f in FAILURES:

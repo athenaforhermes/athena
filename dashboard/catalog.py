@@ -347,6 +347,30 @@ def _gh_token() -> str:
     return token
 
 
+# Hosts a GitHub token may travel to. Anything else is somebody else's server, however
+# much its name looks like GitHub's.
+_GITHUB_HOSTS = (
+    "github.com", "api.github.com", "raw.githubusercontent.com",
+    "codeload.github.com", "objects.githubusercontent.com",
+)
+
+
+def github_url(url: str) -> bool:
+    """True when this URL's *host* is GitHub, and so may carry the token Hermes holds.
+
+    The check this replaces was `"github" in url`, which a stranger satisfies without
+    trying: `https://github.evil.com/...` contains it, and so does
+    `https://example.com/github.com/store`. Both were sent an `Authorization: Bearer`
+    header carrying the person's own GitHub token. The host is parsed and compared
+    exactly instead, and a suffix match on some other domain does not qualify.
+    """
+    try:
+        host = (urllib.parse.urlparse(str(url)).hostname or "").lower().rstrip(".")
+    except Exception:  # noqa: BLE001 - an unparseable URL is not a GitHub one
+        return False
+    return host in _GITHUB_HOSTS
+
+
 def _to_api_url(url: str) -> Optional[str]:
     """The contents-API equivalent of a raw or web GitHub URL.
 
@@ -381,7 +405,7 @@ def _get_json(url: str, timeout: int = 30, token: str = "") -> Any:
     last: Optional[Exception] = None
     for i, target in enumerate(attempts):
         headers = {"User-Agent": UA, "Accept": "application/vnd.github.raw"}
-        if token and "github" in target:
+        if token and github_url(target):
             headers["Authorization"] = f"Bearer {token}"
         try:
             req = urllib.request.Request(target, headers=headers)
@@ -597,7 +621,7 @@ def _get_bytes(url: str, timeout: int = 30, token: str = "") -> bytes:
     last: Optional[Exception] = None
     for i, target in enumerate(attempts):
         headers = {"User-Agent": UA, "Accept": "application/vnd.github.raw"}
-        if token and "github" in target:
+        if token and github_url(target):
             headers["Authorization"] = f"Bearer {token}"
         try:
             req = urllib.request.Request(target, headers=headers)

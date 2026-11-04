@@ -30,6 +30,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import catalog as athena_catalog
 import credentials as athena_credentials
 import engine as athena_engine
 import naming as athena_naming
@@ -637,7 +638,7 @@ def _download_icon(url: str, dest: Path) -> bool:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "athena"})
         tok = _gh_token()
-        if tok and "github" in url:
+        if tok and athena_catalog.github_url(url):
             req.add_header("Authorization", f"Bearer {tok}")
         with urllib.request.urlopen(req, timeout=20) as r:
             data = r.read()

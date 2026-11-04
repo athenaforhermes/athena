@@ -973,6 +973,17 @@ def _ensure_app(mod, app_id: str, seconds: float = 90.0) -> Dict[str, Any]:
     if url:
         _idle_use(mod, app_id, "an agent call")
         return {"url": url, "note": "already running"}
+    # The same question `athena_launch` asks, asked where an app is actually started.
+    # Two other tools reach this function -- `athena_generate` and `athena_capabilities`
+    # both probe an app by starting it -- so the gate belongs on the start rather than on
+    # the one tool that happened to have one. `athena:launch` is the rule key
+    # `athena_launch` already asks under, so a person's standing answer covers both and
+    # nobody is asked twice about one app. A refusal is a refusal: nothing starts.
+    asked = mod.engine.ask_approval(
+        "athena_launch", f"Athena wants to start {app_id}, which runs its code on this "
+        "machine as you.", "athena:launch")
+    if not asked.get("approved"):
+        return {"url": "", "note": asked.get("message") or "not approved"}
     rt = mod.athena_runtime.Runtime(mod.engine.port, mod.engine.home)
     res = rt.start(app_id)
     if res.get("ok"):

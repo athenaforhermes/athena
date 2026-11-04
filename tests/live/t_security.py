@@ -353,6 +353,66 @@ check("... while the credential helper it needs is still only on the command lin
 
 shutil.rmtree(tmp, ignore_errors=True)
 
+# ---------------------------------------------------------------------------------------
+# Two more places where Athena decides how far its own reach goes: which host a token may
+# be handed to, and whether a write may edit the file that says which writes are allowed.
+# ---------------------------------------------------------------------------------------
+print("\n== a GitHub token goes to GitHub, and to nobody who spells it that way ==")
+import catalog as athena_catalog  # noqa: E402
+
+check("api.github.com is GitHub, and may carry the token",
+      athena_catalog.github_url("https://api.github.com/user/repos"))
+check("raw.githubusercontent.com is GitHub too",
+      athena_catalog.github_url("https://raw.githubusercontent.com/o/r/main/f.txt"))
+check("... and a host that merely contains the word is not",
+      not athena_catalog.github_url("https://github.evil.example/o/r.git"))
+check("... nor a path that contains it",
+      not athena_catalog.github_url("https://example.com/github.com/o/r.git"))
+check("... nor a host that carries it as a prefix",
+      not athena_catalog.github_url("https://github.com.evil.example/o/r.git"))
+check("... nor a lookalike of the raw host",
+      not athena_catalog.github_url("https://raw.githubusercontent.com.evil.example/f"))
+check("... and a URL that is not a URL is not GitHub either",
+      not athena_catalog.github_url("") and not athena_catalog.github_url("not a url"))
+check("... nor is a credential-bearing URL with GitHub in its userinfo",
+      not athena_catalog.github_url("https://github.com@evil.example/o/r.git"))
+
+_dash = {p.name: p.read_text(encoding="utf-8")
+         for p in sorted((PLUGIN / "dashboard").glob("*.py"))}
+# Asked of the syntax rather than of the text: this rule is about a comparison, and the
+# fix's own comment quotes the old one -- a search for the words would call a comment a
+# regression, and a rule that cannot tell code from prose gets deleted rather than fixed.
+import ast  # noqa: E402
+
+_substring = []
+for _name, _body in _dash.items():
+    for _node in ast.walk(ast.parse(_body)):
+        if (isinstance(_node, ast.Compare) and isinstance(_node.left, ast.Constant)
+                and isinstance(_node.left.value, str)
+                and "github" in _node.left.value.lower()
+                and any(isinstance(_op, (ast.In, ast.NotIn)) for _op in _node.ops)):
+            _substring.append(f"{_name}:{_node.lineno}")
+check("a URL is not tested for the word github anywhere", not _substring, ", ".join(_substring))
+check("... and the build path asks the same question instead of keeping its own copy",
+      "athena_catalog.github_url(" in _dash["buildapp.py"])
+
+print("\n== the file that says where a write may go is not somewhere a write may go ==")
+_home = files._athena_home()
+for _where, _label in ((_home / "settings.json", "Athena's own settings file"),
+                       (files.PLUGIN_DIR / "settings.json", "the plugin's settings file")):
+    _why = files._safety_reason(_where)
+    check(f"{_label} is refused, with a reason", bool(_why), repr(_why))
+check("... and the roots are read from the same list this refusal is about",
+      files._settings_files() == (files.PLUGIN_DIR / "settings.json",
+                                  _home / "settings.json"),
+      str(files._settings_files()))
+_ordinary = _home / "apps" / "demo" / "note.txt"
+check("... while an ordinary file inside a write root is still allowed",
+      files._safety_reason(_ordinary) == "", repr(files._safety_reason(_ordinary)))
+check("... and a path that only looks like the settings file is not the one refused",
+      files._safety_reason(_home / "apps" / "demo" / "settings.json") == "",
+      repr(files._safety_reason(_home / "apps" / "demo" / "settings.json")))
+
 print(f"\n{PASS}/{PASS + FAIL} checks passed")
 if FAILURES:
     print("failing: " + "; ".join(FAILURES))

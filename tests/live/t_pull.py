@@ -69,6 +69,23 @@ home = Path(tempfile.mkdtemp(prefix="athena-pull-"))
 api._athena_home = lambda: home
 (home / "api").mkdir(parents=True)
 
+# The stand-in CLI below is configured through environment variables, and the child a
+# pull starts is handed the allowlist rather than this process's environment — that is
+# the point of the allowlist, and it is asserted in `t_child_env.py`. So the fixture's
+# own knobs are added back here, at the one place they are read from, and only for this
+# test: `HF_*` coordinates and the app's granted token still arrive the way they do in
+# production, through the `extra` dict that `_pull_run` builds.
+_real_child_env = api.athena_engine.child_env
+
+
+def _child_env_with_stub(extra=None):
+    env = _real_child_env(extra)
+    env.update({k: v for k, v in os.environ.items() if k.startswith("ATH_STUB_")})
+    return env
+
+
+api.athena_engine.child_env = _child_env_with_stub
+
 
 def make_app(name: str) -> Path:
     d = home / "api" / name

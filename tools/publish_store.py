@@ -416,7 +416,10 @@ def ensure_checkout(out: Path, clone_url: str, token: str = "", progress=print) 
             env={**os.environ, "ATHENA_GH_TOKEN": token} if token else None)
     else:
         progress(f"Cloning {clone_url}")
-        run(["git", *auth_args(token), "clone", "-q", clone_url, str(out)],
+        # `--` before the URL: the URL is data, and one that starts with a dash is an
+        # option to git otherwise (`--upload-pack=...` reads it as a command to run).
+        # It comes from the store's own metadata, not from this program.
+        run(["git", *auth_args(token), "clone", "-q", "--", clone_url, str(out)],
             env={**os.environ, "ATHENA_GH_TOKEN": token} if token else None)
     return out
 

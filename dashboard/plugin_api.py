@@ -1930,10 +1930,8 @@ def _pull_run(job: Dict[str, Any]) -> Dict[str, Any]:
     # app's to spend, and an app nobody has said yes for downloads anonymously.
     # The CLI draws its bar with carriage returns, which arrive as one enormous line
     # and say nothing a job log can show; the bytes on disk are the progress instead.
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")}
-    env["HF_HOME"] = str(home / "cache" / "HF_HOME")
-    env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    env = athena_engine.child_env({"HF_HOME": str(home / "cache" / "HF_HOME"),
+                                   "HF_HUB_DISABLE_PROGRESS_BARS": "1"})
     if job.get("token"):
         env["HF_TOKEN"] = env["HUGGING_FACE_HUB_TOKEN"] = str(job["token"])
     cmd = [str(cli), "download", repo]
@@ -4139,7 +4137,7 @@ def _link_dir(src: Path, dst: Path) -> None:
     """
     if os.name == "nt":
         p = subprocess.run(["cmd", "/c", "mklink", "/J", str(dst), str(src)],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=athena_engine.child_env())
         if p.returncode != 0:
             raise RuntimeError((p.stderr or p.stdout or "mklink failed").strip())
     else:
@@ -6370,8 +6368,9 @@ def _venv_smoke(py: Path) -> Optional[str]:
     right can still resolve to nothing if its base interpreter is gone.
     """
     try:
+        # `env=`: the app's interpreter runs its own `.pth` code at startup.
         p = subprocess.run([str(py), "-c", "import sys; print(sys.prefix)"],
-                           capture_output=True, text=True, timeout=90)
+                           capture_output=True, text=True, timeout=90, env=athena_engine.child_env())
     except (OSError, subprocess.TimeoutExpired) as e:  # noqa: BLE001
         return f"cannot run ({e})"
     if p.returncode != 0:
@@ -6636,10 +6635,11 @@ def _app_menu(app_id: str) -> Dict[str, Any]:
         pass
 
     try:
+        # `env=`: this child runs the app's own code (menu.js `require()`s its launcher).
         proc = subprocess.run(
             [node, str(script), str(folder),
              json.dumps({"running": running, "urls": urls})],
-            capture_output=True, text=True, timeout=MENU_TIMEOUT)
+            capture_output=True, text=True, timeout=MENU_TIMEOUT, env=athena_engine.child_env())
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "the app's menu took too long to resolve"}
     raw = (proc.stdout or "").strip().splitlines()

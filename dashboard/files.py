@@ -447,7 +447,7 @@ def _named_write_roots() -> List[Path]:
     """
     named: List[str] = [p for p in (os.environ.get(_WRITE_ROOTS_ENV) or "").split(os.pathsep)
                         if p.strip()]
-    for cfg_file in (PLUGIN_DIR / "settings.json", _athena_home() / "settings.json"):
+    for cfg_file in _settings_files():
         try:
             cfg = json.loads(cfg_file.read_text(encoding="utf-8")) or {}
         except Exception:
@@ -468,6 +468,17 @@ def _named_write_roots() -> List[Path]:
         if rp not in out:
             out.append(rp)
     return out
+
+
+def _settings_files() -> tuple:
+    """The files that decide this plugin's write scope, named once for both readers.
+
+    `_named_write_roots()` reads `write_roots` out of these; `_safety_reason()` refuses to
+    write them. Both, because one of them lives *inside* the root it defines: an approved
+    write could otherwise edit the file that says what an approved write may reach, and
+    widen its own permission with each round.
+    """
+    return (PLUGIN_DIR / "settings.json", _athena_home() / "settings.json")
 
 
 def _write_roots() -> List[Path]:
@@ -908,6 +919,13 @@ def _safety_reason(p: Path) -> str:
         try:
             if rp == root or root in rp.parents:
                 return "a folder that holds code Hermes runs, or another profile's own state"
+        except Exception:
+            continue
+    for cfg in _settings_files():
+        try:
+            if rp == cfg:
+                return ("Athena's own settings file, which is what decides where a write "
+                        "is allowed: changing it would widen its own permission")
         except Exception:
             continue
     return ""

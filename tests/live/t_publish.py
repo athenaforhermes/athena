@@ -173,6 +173,29 @@ pub.ensure_checkout(clone_dir, str(origin), progress=lambda *_: None)
 check("an existing one is fetched, never re-cloned",
       (clone_dir / ".git").is_dir() and git("rev-parse", "main", cwd=clone_dir) == head_before)
 
+print("\n-- a URL that reads as an option is not one --")
+# The store URL is metadata, so it is data. `git clone -q --upload-pack=...` is a command
+# to run, and the guard is the same one the app installer uses: `--` before the URL.
+_hostile = tmp / "hostile-checkout"
+_seen = {}
+
+
+def _record(cmd, cwd=None, check=True, env=None):
+    _seen["argv"] = list(cmd)
+    return ""
+
+
+_real_run = pub.run
+pub.run = _record
+try:
+    pub.ensure_checkout(_hostile, "--upload-pack=calc.exe", progress=lambda *_: None)
+finally:
+    pub.run = _real_run
+_argv = _seen.get("argv", [])
+check("the clone separates its options from the URL with `--`",
+      "--" in _argv and _argv.index("--") == _argv.index("--upload-pack=calc.exe") - 1,
+      str(_argv))
+
 print("\n-- a token never lands in the checkout --")
 args = pub.auth_args("ghp_example_secret")
 check("auth is passed as command-line config, not to the remote",

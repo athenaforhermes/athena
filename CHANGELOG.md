@@ -57,6 +57,46 @@ changed, not because the API did.
   WSL and QEMU guests accept command execution, and that publishing exists — and it no longer
   claims a credential is reused in the way the review could not support.
 
+### Review pass — the second review's four items
+
+- **Three more children get the allowlist instead of this process's environment.** The first
+  review's fix covered the engine and an app's own git; three other spawns still inherited
+  everything Athena holds, because a `subprocess.run` without `env=` does that by default.
+  They are the `menu.js` spawn — which `require()`s the app's own launcher, so the app's code
+  ran inside the child — the app's virtualenv interpreter, whose `.pth` files execute before
+  `-c` runs a line, and the HuggingFace download child, which built its environment by
+  *subtracting* two names from `os.environ` and so leaked any key named after them. All three
+  build from the allowlist now, which fails closed.
+- **`git` is no longer run inside somebody else's checkout with this environment.** Deciding
+  whether a file is the app's or the app's download asks a repository Athena did not write,
+  and git reads that repository's own `.git/config` before it answers — where `core.fsmonitor`
+  names a program to run. It gets the allowlist, and if the allowlist cannot be reached it is
+  not run at all.
+- **Starting an app is the question, whichever tool starts it.** The prompt was attached to
+  `athena_launch`, and `athena_generate` and `athena_capabilities` reach the same start through
+  `_ensure_app` — so an agent could put third-party code on the machine by asking what an app
+  can do. The question is asked where the app is actually started, under the rule key
+  `athena_launch` already uses: one standing answer covers both doors, and an app that is
+  already running is not asked about again.
+- **A GitHub token goes to GitHub, and to nobody who spells it that way.** The token was
+  attached to any URL containing the word `github` — `https://github.evil.example/o/r.git` and
+  `https://example.com/github.com/o/r.git` both satisfied it. The URL is parsed and the host
+  named, in one function both call sites use.
+- **The file that says where a write may go is not somewhere a write may go.** `write_roots` is
+  read from `settings.json`, and that file sat inside Athena's own write root — so a write could
+  widen the fence and then use it. It is refused by name.
+
+Each of them has a test that fails the day it comes back. The class is checked too, not just
+the sites: `tests/live/t_child_env.py` counts every spawn in the plugin's Python that passes no
+`env=` against a table of the ones that do it deliberately, counts the spellings that would get
+around such a check (an import alias, a name imported from `subprocess`), and fails on a new one
+wherever it lands. The pull fixture was adapted rather than exempted: its stand-in CLI is
+configured by environment variables, so `t_pull.py` hands those back at the one place the child
+environment is built — production still passes no such thing, and the allowlist itself is
+asserted in `t_child_env.py`. The same guard the installer already had was missing in one more
+place — the store checkout ran `git clone` with the URL unseparated — so it is there now too, and
+a test asks for it by argument, not by reading the source.
+
 ## 1.0.0
 
 The local AI app store for Hermes. Browse a catalogue of thousands of AI apps,

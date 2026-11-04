@@ -135,9 +135,20 @@ def tracked_by_git(p: Path) -> bool:
     parent = p.parent
     if not (parent / ".git").exists():
         return False
+    # Git is run against someone else's checkout, so it gets the allowlist and not this
+    # process's environment: a repository's own `.git/config` is arbitrary content, and
+    # git reads it before it answers -- `core.fsmonitor` names a program to run. The
+    # import is local because this module is a string helper and everything imports it;
+    # if the allowlist cannot be reached, git is not run at all and the answer is the
+    # conservative one this function already gives when it cannot tell.
+    try:
+        import engine as athena_engine
+    except Exception:  # noqa: BLE001
+        return True
     try:
         r = subprocess.run(["git", "-C", str(parent), "ls-files", "--error-unmatch",
-                            p.name], capture_output=True, text=True, timeout=20)
+                            p.name], capture_output=True, text=True, timeout=20,
+                           env=athena_engine.child_env())
     except Exception:  # noqa: BLE001
         return True      # cannot tell → assume theirs, and leave it alone
     return r.returncode == 0
