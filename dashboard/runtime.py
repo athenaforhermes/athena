@@ -41,8 +41,10 @@ import json
 
 import naming as athena_naming
 import os
+import re
 import socket
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -97,6 +99,80 @@ def _port_open(url: str, timeout: float = 0.35, ttl: float = 2.0) -> bool:
     s.close()
     _PORT_OPEN_AT[url] = (now, True)
     return True
+
+
+# ------------------------------------------------------------------- framing
+# A running app can refuse the frame it is drawn in, and the refusal is invisible
+# from inside the renderer: `frame-ancestors` is enforced against the document that
+# owns the <iframe>, and that document is cross-origin to the app, so nothing in the
+# panel can read the header that decides it. The packaged desktop's own document is
+# a `file://` page — an opaque origin — and an app whose policy names specific
+# `http://` sources (loopback, plus the launcher that started it, which is what a
+# local app that can spend the GPU reasonably allows) then paints an empty
+# rectangle while it runs perfectly. So the question is asked here, before the
+# frame, and answered with a reason that can be shown instead of a white void.
+#
+# The answer is remembered per address for a while: it is a property of whatever is
+# listening there, and asking the app mid-generation would queue behind its own
+# work — the same reason the health route is deliberately shallow.
+_FRAME_ANCESTORS = re.compile(r"frame-ancestors\s+([^;]+)", re.I)
+_FRAME_POLICY: dict = {}
+_FRAME_POLICY_TTL = 300.0
+
+
+def frame_ancestors(headers) -> tuple:
+    """Every source named by `frame-ancestors`, across every policy header sent.
+
+    A response may carry more than one policy and they intersect with each other,
+    so the sources are only absent when no header names any.
+    """
+    sources: list = []
+    for value in headers or []:
+        for found in _FRAME_ANCESTORS.finditer(value or ""):
+            sources.extend(found.group(1).split())
+    return tuple(sources)
+
+
+def _csp_headers(url: str, timeout: float) -> list:
+    """This app's own Content-Security-Policy headers, or none if it will not say."""
+    for method in ("HEAD", "GET"):
+        try:
+            req = urllib.request.Request(url, method=method, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return list(r.headers.get_all("Content-Security-Policy") or [])
+        except urllib.error.HTTPError:
+            continue  # HEAD refused (405, 501): ask once more with a real request
+        except Exception:  # noqa: BLE001
+            return []  # nothing answered there, so there is no header to read
+    return []
+
+
+def frame_policy(url: str, timeout: float = 4.0) -> dict:
+    """Whether this app's interface may be drawn in Athena's frame, and why not.
+
+    Only a specific source list refuses the frame: no header at all, `*` and a
+    `file:` scheme-source all leave it legal, while `'self'` and named hosts cannot
+    match the opaque `file://` document the packaged desktop draws in. An address
+    nothing answers on counts as legal too — the frame's own error is the honest one
+    there, and a reason invented here would replace it.
+    """
+    now = time.monotonic()
+    hit = _FRAME_POLICY.get(url)
+    if hit and now - hit[0] < _FRAME_POLICY_TTL:
+        return hit[1]
+    sources = frame_ancestors(_csp_headers(url, timeout))
+    out: dict = {"frameable": True, "policy": None}
+    if sources and "*" not in sources and "file:" not in sources:
+        out = {
+            "frameable": False,
+            "policy": "frame-ancestors " + " ".join(sources),
+            "note": ("It allows itself to be shown only inside this machine's own "
+                     "loopback addresses and the launcher that started it, which "
+                     "this window is not. The app is running normally — open it in "
+                     "your browser, or read its output on the Terminal tab."),
+        }
+    _FRAME_POLICY[url] = (now, out)
+    return out
 
 
 def _scrub(text: str) -> str:

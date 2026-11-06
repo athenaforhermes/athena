@@ -6,7 +6,7 @@ one machine and shipped nowhere.
 
 ## 1.0.1
 
-Three defects found before launch, and one sentence of launch copy that could not
+Four defects found before launch, and one sentence of launch copy that could not
 be supported.
 
 - **The idle reaper no longer stops an app that is working.** Idleness is now
@@ -24,6 +24,17 @@ be supported.
 - **The launch copy no longer claims an unverified catalogue size.** "a
   catalogue of thousands of AI apps" is now "a constantly growing catalogue of
   apps", in the manifest, the catalogue entry and the README.
+- **The declared Hermes window no longer expires.** `requires_hermes` was
+  `">=0.21.0,<0.23.0"`, and a ceiling there is a
+  self-destruct rather than caution: Hermes refuses a catalogue entry whose window
+  excludes the version running here (`athena needs Hermes >=0.21.0,<0.23.0; this is
+  0.23.0.`), and the loader's re-gate treats that mismatch as never-importable.
+  Hermes reached 0.23.0, so installing Athena by name was refused — and from the
+  catalogue that is the only way in. The floor stays and the ceiling is gone, which
+  is what the catalogue itself does: 749 of its 753 entries declare a floor and
+  nothing above it. A floor cannot expire, so this line never needs maintaining
+  again. (Rule 10's floor-plus-ceiling advice is about `python_dependencies` —
+  those remain bounded.)
 
 The version is bumped because the product description and the claim surface
 changed, not because the API did.
@@ -96,6 +107,26 @@ environment is built — production still passes no such thing, and the allowlis
 asserted in `t_child_env.py`. The same guard the installer already had was missing in one more
 place — the store checkout ran `git clone` with the URL unseparated — so it is there now too, and
 a test asks for it by argument, not by reading the source.
+
+### Found by using it — a white pane where an app was already running
+
+- **An app that refuses to be framed now says so.** Framing is a rule about the
+  page that owns the `<iframe>`, never about the app inside it, and the desktop
+  owns its frame from a `file://` document — an origin that no `http://` source can
+  match. Maestro allows only this machine's loopback addresses and the launcher
+  that started it, so it painted an empty rectangle while running perfectly and
+  logging `Application startup complete`. The backend now reads the app's own
+  `frame-ancestors` before the frame is drawn, and the panel shows the app's name,
+  the reason and a way out instead of a white void. The answer is remembered and
+  expires, because a poll every two and a half seconds must not ask an app that is
+  busy generating.
+- **The Browser button now opens the browser.** It tested
+  `ctx.host.openExternal`, and the pane bridge has no such member: the call fell
+  through to `window.open`, which the desktop denies. The button did nothing at
+  all, and the only trace was `[window-open] denied` in the desktop log. It and the
+  Open-repository link now go through `ctx.os.openExternal`, the SDK's own door —
+  which is also the way around a refused frame, since a top-level document has no
+  ancestor to check.
 
 ## 1.0.0
 

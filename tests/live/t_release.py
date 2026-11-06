@@ -393,8 +393,12 @@ def check_manifest() -> None:
     plug = read(PLUGIN / "plugin.yaml")
     spec = yaml_scalar(plug, "requires_hermes") or ""
     check("requires_hermes has a lower bound", ">" in spec, repr(spec))
-    check("requires_hermes has an upper bound", "<" in spec,
-          f"{spec!r} — an unbounded major version is how a working plugin stops importing")
+    # A ceiling here is a self-destruct, not caution: Hermes refuses a plugin whose
+    # window excludes the running version, so `>=0.21.0,<0.23.0` stopped Athena being
+    # installable the day 0.23.0 shipped. A floor cannot expire.
+    check("requires_hermes has no ceiling", "<" not in spec,
+          f"{spec!r} — an upper bound here disables the plugin on the next release, "
+          "and refuses every install by catalogue name")
     cat_spec = yaml_scalar(read(PLUGIN / "docs" / "catalog-entry.yaml"), "requires_hermes")
     check("the catalogue entry claims the same window", cat_spec == spec,
           f"catalogue={cat_spec!r} plugin={spec!r}")

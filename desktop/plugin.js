@@ -650,6 +650,23 @@ function notify(ctx, kind, message) {
   } catch { /* notifications are best effort */ }
 }
 
+/* The one door out to the OS: `ctx.os.openExternal`, the SDK's curated bridge. A
+   copy of this that tests the pane bridge instead — `ctx.host.openExternal`, which
+   has no such member — silently falls through to `window.open`, and the desktop
+   denies new windows: a button built to hand an address to the browser then did
+   nothing at all, leaving `[window-open] denied` in the log as the only trace. A
+   top-level document is also the way around an app that refuses to be framed,
+   because framing is a rule about ancestors and the top has none. */
+function openExternal(ctx, url) {
+  if (!url) return false
+  try {
+    const os = ctx && ctx.os
+    if (os && typeof os.openExternal === 'function') { os.openExternal(url); return true }
+    window.open(url, '_blank')
+    return true
+  } catch { return false }
+}
+
 /* A backend that answers 200 with {ok: false} has NOT succeeded, and the engine
    routes are the ones that talk that way: a start with no usable Node, a spawn
    that dies, a port that never answers. Reading only the status code made every
@@ -2558,8 +2575,7 @@ function StoreCard({ ctx, app, onInstalled }) {
             size: 'micro', variant: 'ghost',
             onClick: () => {
               const url = repo.startsWith('http') ? repo : `https://github.com/${repo}`
-              if (ctx.host && ctx.host.openExternal) ctx.host.openExternal(url)
-              else window.open(url, '_blank')
+              openExternal(ctx, url)
             },
             children: 'Open repository',
           }) }) : null,
@@ -5465,6 +5481,12 @@ function Viewer({ ctx }) {
   const [nonce, setNonce] = useState(0)
   const [busy, setBusy] = useState('')
   const [ticks, setTicks] = useState(0)
+  // Whether this app's own headers allow it to be drawn in this window, and the
+  // reason when they do not. `frame-ancestors` is enforced against THIS document,
+  // which the packaged desktop loads from `file://` -- an origin an app that allows
+  // only loopback and its launcher cannot match. Without the answer the app paints
+  // an empty rectangle while running perfectly, which reads as Athena being broken.
+  const [embed, setEmbed] = useState(null)
   const termRef = useRef(null)
   const stick = useRef(true)
   // Once the user picks a tab themselves, stop moving it for them.
@@ -5476,6 +5498,7 @@ function Viewer({ ctx }) {
     autoTab.current = true
     setTicks(0)
     setUrl(app.url || '')
+    setEmbed(null)
     // An app with no address yet is showing its output, not a blank frame.
     setSub(app.url ? 'app' : 'terminal')
   }, [id])
@@ -5493,6 +5516,7 @@ function Viewer({ ctx }) {
         if (autoTab.current) setSub('app')
       }
       setLog(s.log_tail || '')
+      setEmbed(s.embed || null)
     } catch { setAlive(false) }
     setTicks(n => n + 1)
   }, [ctx, id])
@@ -5577,11 +5601,13 @@ function Viewer({ ctx }) {
   }
   const openBrowser = () => {
     if (!url) return
-    try {
-      if (host.openExternal) host.openExternal(url)
-      else window.open(url, '_blank')
-    } catch { /* leave it in the frame */ }
+    // Handing the address to the real browser is also the way around an app that
+    // will not be framed: a top-level document has no ancestor to check.
+    if (!openExternal(ctx, url)) notify(ctx, 'error', 'Could not open that address.')
   }
+
+  // Only a specific allow-list refuses the frame; an absent answer is not a refusal.
+  const refused = embed && embed.frameable === false ? embed : null
 
   const tabBtn = (key, label, disabled) => jsx('button', {
     className: 'ah-tabb' + (sub === key ? ' active' : ''),
@@ -5615,12 +5641,23 @@ function Viewer({ ctx }) {
       tabBtn('app', 'App', !url),
       tabBtn('terminal', 'Terminal', false),
     ] }),
-    sub === 'app' && url
+    sub === 'app' && url && !refused
       ? jsx('iframe', {
           className: 'ah-vframe', src: url, key: url + ':' + nonce,
           title: app.name, allow: 'clipboard-write; fullscreen',
           sandbox: 'allow-same-origin allow-scripts allow-forms allow-popups allow-downloads allow-modals',
         })
+      : null,
+    sub === 'app' && url && refused
+      ? jsxs('div', { className: 'ah-vwait', children: [
+          jsx('div', { children: (app.name || app.id) + ' is running, but it will not display here.' }),
+          jsx('div', { className: 'ah-sub', title: refused.policy || '', children: refused.note }),
+          jsx('div', { className: 'ah-row', children: [
+            jsx('button', { className: 'ah-btn', onClick: openBrowser, children: 'Open in browser' }),
+            jsx('button', { className: 'ah-btn', children: 'Show Terminal',
+              onClick: () => { autoTab.current = false; setSub('terminal') } }),
+          ] }),
+        ] })
       : null,
     sub === 'app' && !url
       ? jsxs('div', { className: 'ah-vwait', children: [

@@ -1019,6 +1019,9 @@ def app_status(app_id: str) -> JSONResponse:
         return JSONResponse({
             "running": bool(flat),
             "url": url,
+            # Legality of the frame below for this address — the panel polls this
+            # route already, and a renderer cannot read a cross-origin app's headers.
+            "embed": athena_runtime.frame_policy(url) if url else None,
             "port": _port_of(url),
             "scripts": flat,
             "log_tail": rt.logs(app_id)[-6000:],
@@ -3795,9 +3798,8 @@ def clone_app(repo_url: str, home: Path, timeout: int = 1800,
     # line of history: still a full clone of that branch, so the app's own
     # `git pull` still works, but nothing else comes along.
     #
-    # `--` before the URL because the URL is data: one that starts with a dash is an
-    # option to git otherwise (`--upload-pack=...` reads a URL as a command to run),
-    # and this URL comes from a repository's own metadata.
+    # `--` before the URL because the URL is data, not a command line: it comes from
+    # a repository's own metadata, where `--upload-pack=...` reads as an option to run.
     args = ["git", "clone"]
     if ref:
         args += ["--branch", ref, "--single-branch"]
